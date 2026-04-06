@@ -1122,13 +1122,6 @@ unwrap :: proc(m: Maybe($T)) -> ^T {
 	return nil
 }
 
-random_psk :: proc() -> [32]u8 {
-	psk : [32]u8
-	crypto.rand_bytes(psk[:])
-	return psk
-}
-
-
 cryptobuffer_from_slice :: proc(slice: []u8) -> CryptoBuffer {
 	assert(len(slice) > 16)
 	length := len(slice)-16
@@ -1154,19 +1147,6 @@ to_be_bytes :: proc(n: u64) -> [8]u8 {
 	return {n7, n6, n5, n4, n3, n2, n1, n0}
 }
 
-
-to_le_bytes :: proc(n: u64) -> [8]u8 {
-	n0 := u8(n >> 0)
-	n1 := u8(n >> 8)
-	n2 := u8(n >> 16)
-	n3 := u8(n >> 24)
-	n4 := u8(n >> 32)
-	n5 := u8(n >> 40)
-	n6 := u8(n >> 48)
-	n7 := u8(n >> 56)
-	return {n0, n1, n2, n3, n4, n5, n6, n7}
-}
-
 nonce_from_u64 :: proc(n: u64) -> [12]u8 {
 	n := to_be_bytes(n)
 	return {0,0,0,0,n[0], n[1], n[2], n[3], n[4], n[5], n[6], n[7]}
@@ -1181,47 +1161,9 @@ array_xor :: proc(a: []u8, b: []u8, allocator: mem.Allocator) -> []u8 {
 	return c
 }
 
-zeropad128 :: proc(input: []u8) -> [128]u8 {
-	assert(len(input) <= 128)
-	output : [128]u8
-	copy(output[:], input[:])
-	return output
-}
-
-zeropad64 :: proc(input: []u8) -> [64]u8 {
-	assert(len(input) <= 64)
-	output : [64]u8
-	copy(output[:], input[:])
-	return output
-}
-
-zeropad32 :: proc(input: []u8) -> [32]u8 {
-	assert(len(input) <= 32)
-	output : [32]u8
-	copy(output[:], input[:])
-	return output
-}
-
-zeropad :: proc(input: []u8, pad_to_size: int, allocator := context.allocator) -> []u8 {
-	output := make([]u8, pad_to_size)
-	copy(output, input)
-	return output
-}
-
 concat_bytes :: proc(b1: []u8, b2: []u8, allocator := context.allocator) -> []u8 {
 	output := make_slice([]u8, len(b1) + len(b2), allocator)
 	copy(output[0:len(b1)], b1)
 	copy(output[len(b1):], b2)
 	return output
-}
-
-slices_do_not_overlap :: proc(a: []$A, b: []$B) -> bool {
-	a_address := transmute(u64)raw_data(a)
-	b_address := transmute(u64)raw_data(b)
-
-	if a_address > b_address {
-		return b_address + u64(len(b)*size_of(B)) < a_address
-	} else {
-		return a_address + u64(len(a)*size_of(A)) <= b_address
-	}
 }

@@ -80,6 +80,7 @@ CipherStates :: struct {
 	initiator: bool,
 }
 
+// XXX/yeet: private key contains public key.
 KeyPair :: struct {
 	public: ecdh.Public_Key,
 	private: ecdh.Private_Key,
@@ -99,8 +100,6 @@ CryptoBuffer :: struct {
 }
 
 // cryptobuffer_from_slice :: internals.cryptobuffer_from_slice
-
-// to_le_bytes :: internals.to_le_bytes
 
 initiator_step :: proc(handshakestate: ^HandshakeState, input_message: []u8, payload : []u8 = nil, allocator := context.allocator) -> (CipherStates, []u8, NoiseStatus) {
 	output_message : []u8
