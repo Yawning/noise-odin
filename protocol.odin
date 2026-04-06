@@ -67,11 +67,6 @@ IPAD : [MAX_BLOCKLEN]u8 = {0..<MAX_BLOCKLEN = 0x36}
 @(rodata)
 OPAD : [MAX_BLOCKLEN]u8 = {0..<MAX_BLOCKLEN = 0x5c}
 
-MessagePattern :: struct {
-	pre_messages : []PreToken,
-	messages : [][]Token,
-}
-
 Protocol :: struct {
 	dh: ecdh.Curve,
 	handshake_pattern: Handshake_Pattern,
@@ -409,33 +404,6 @@ HKDF :: proc(chaining_key: []u8, input_key_material: []u8, protocol: Protocol, a
 	return output1, output2, output3
 }
 
-PreToken :: enum {
-	res_s,
-	ini_s,
-}
-
-Token :: enum {
-	e,
-	s,
-	ee,
-	es,
-	se,
-	ss,
-	psk,
-}
-
-is_psk_pattern :: proc(pattern: ^MessagePattern) -> bool {
-	for p in pattern.messages {
-		for m in p {
-			if m == .psk {
-				return true
-			}
-		}
-	}
-
-	return false
-}
-
 get_curve :: proc(handshake_state: ^HandshakeState) -> ecdh.Curve {
 	return handshake_state.symmetricstate.cipherstate.protocol.dh
 }
@@ -652,7 +620,7 @@ symmetricstate_Split :: proc(self: ^SymmetricState) -> (CipherState, CipherState
 //	public keys are hashed first.
 //  - If multiple public keys are listed in either party's pre-message,
 //	the public keys are hashed in the order that they are listed.
-//  -  Sets message_patterns to the message patterns from handshake_pattern.
+//  -  Sets message_pattern to the message patterns from handshake_pattern.
 handshakestate_initialize :: proc(
 	initiator: bool,
 	prologue: []u8,
@@ -677,13 +645,13 @@ handshakestate_initialize :: proc(
 
 	if message_pattern.pre_messages != nil {
 		if initiator {
-			if slice.contains(message_pattern.pre_messages, PreToken.res_s) {
+			if slice.contains(message_pattern.pre_messages, Pre_Token.res_s) {
 				if rs == nil {
 					return {}, .rs_not_set_for_s_pre_message
 				}
 			}
 		} else {
-			if slice.contains(message_pattern.pre_messages, PreToken.ini_s) {
+			if slice.contains(message_pattern.pre_messages, Pre_Token.ini_s) {
 				if rs == nil {
 					return {}, .rs_not_set_for_s_pre_message
 				}
@@ -698,26 +666,26 @@ handshakestate_initialize :: proc(
 
 	if message_pattern.pre_messages != nil {
 		if initiator {
-			if slice.contains(message_pattern.pre_messages, PreToken.ini_s) {
+			if slice.contains(message_pattern.pre_messages, Pre_Token.ini_s) {
 				dst : [MAX_DHLEN]u8
 				temp_s := s.?
 				ecdh.public_key_bytes(&temp_s.public, dst[:DhLen(symmetricstate.cipherstate.protocol.dh)])
 				symmetricstate_MixHash(&symmetricstate, dst[:DhLen(symmetricstate.cipherstate.protocol.dh)])
 			}
-			if slice.contains(message_pattern.pre_messages, PreToken.res_s) {
+			if slice.contains(message_pattern.pre_messages, Pre_Token.res_s) {
 				dst : [MAX_DHLEN]u8
 				temp_rs := rs.?
 				ecdh.public_key_bytes(&temp_rs, dst[:DhLen(symmetricstate.cipherstate.protocol.dh)])
 				symmetricstate_MixHash(&symmetricstate, dst[:DhLen(symmetricstate.cipherstate.protocol.dh)])
 			}
 		} else {
-			if slice.contains(message_pattern.pre_messages, PreToken.ini_s) {
+			if slice.contains(message_pattern.pre_messages, Pre_Token.ini_s) {
 				dst : [MAX_DHLEN]u8
 				temp_rs := rs.?
 				ecdh.public_key_bytes(&temp_rs, dst[:DhLen(symmetricstate.cipherstate.protocol.dh)])
 				symmetricstate_MixHash(&symmetricstate, dst[:DhLen(symmetricstate.cipherstate.protocol.dh)])
 			}
-			if slice.contains(message_pattern.pre_messages, PreToken.res_s) {
+			if slice.contains(message_pattern.pre_messages, Pre_Token.res_s) {
 				dst : [MAX_DHLEN]u8
 				temp_s := s.?
 				ecdh.public_key_bytes(&temp_s.public, dst[:DhLen(symmetricstate.cipherstate.protocol.dh)])
@@ -737,8 +705,8 @@ handshakestate_initialize :: proc(
 		rs = rs,
 		re = re,
 		initiator = initiator,
-		message_patterns = message_pattern,
-		current_pattern = 0,
+		message_pattern = message_pattern,
+		current_token = 0,
 		psk = psk,
 	}
 
@@ -779,7 +747,7 @@ handshakestate_destroy :: proc(state: ^HandshakeState) {
 // message_buffer to write the output into.
 // Performs the following steps, aborting if any EncryptAndHash() call
 // returns an error:
-//  - Fetches and deletes the next message pattern from message_patterns,
+//  - Fetches and deletes the next message pattern from message_pattern,
 //	then sequentially processes each token from the message pattern:
 //	  - For "e": Sets e (which must be empty) to GENERATE_KEYPAIR().
 //		Appends e.public_key to the buffer. Calls MixHash(e.public_key).
@@ -798,8 +766,8 @@ handshakestate_destroy :: proc(state: ^HandshakeState) {
 handshakestate_write_message :: proc(self: ^HandshakeState, payload: []u8, allocator := context.allocator) -> ([]u8, CipherState, CipherState, NoiseStatus) {
 	// fmt.println("WRITE MESSAGE")
 	message_buffer := make([dynamic]u8, allocator)
-	pattern := self.message_patterns.messages[self.current_pattern]
-	self.current_pattern += 1
+	pattern := self.message_pattern.messages[self.current_token]
+	self.current_token += 1
 	for token in pattern {
 		// fmt.println("token: ", token)
 		switch token {
@@ -822,7 +790,7 @@ handshakestate_write_message :: proc(self: ^HandshakeState, payload: []u8, alloc
 				return {}, {},{}, .out_of_memory
 			}
 			symmetricstate_MixHash(&self.symmetricstate, e_public)
-			if is_psk_pattern(self.message_patterns) {
+			if self.message_pattern.is_psk {
 				symmetricstate_MixKey(&self.symmetricstate, e_public)
 			}
 
@@ -886,9 +854,9 @@ handshakestate_write_message :: proc(self: ^HandshakeState, payload: []u8, alloc
 		}
 	}
 
-	if self.current_pattern == len(self.message_patterns.messages) {
+	if self.current_token == len(self.message_pattern.messages) {
 		c1, c2 := symmetricstate_Split(&self.symmetricstate)
-		self.current_pattern = 0
+		self.current_token = 0
 		free_all(self.symmetricstate.allocator)
 		return message_buffer[:], c1, c2, .Handshake_Complete
 	} else {
@@ -900,7 +868,7 @@ handshakestate_write_message :: proc(self: ^HandshakeState, payload: []u8, alloc
 // payload_buffer to write the message's plaintext payload into.
 // Performs the following steps, aborting if any DecryptAndHash()
 // call returns an error:
-// -  Fetches and deletes the next message pattern from message_patterns,
+// -  Fetches and deletes the next message pattern from message_pattern,
 //	then sequentially processes each token from the message pattern:
 //	- For "e": Sets re (which must be empty) to the next DHLEN bytes
 //	  from the message. Calls MixHash(re.public_key).
@@ -922,8 +890,8 @@ handshakestate_read_message :: proc(self: ^HandshakeState, message: []u8)  -> ([
 	if len(message) < 32 {
 		return {},{},{}, .invalid_message_passed_to_read_message
 	}
-	pattern := self.message_patterns.messages[self.current_pattern]
-	self.current_pattern += 1
+	pattern := self.message_pattern.messages[self.current_token]
+	self.current_token += 1
 	message_cursor := 0
 	for token in pattern {
 		// fmt.println("token: ", token)
@@ -942,7 +910,7 @@ handshakestate_read_message :: proc(self: ^HandshakeState, message: []u8)  -> ([
 				fmt.eprintln("Implementation error: re was not empty when processing token 'e' during read_message.\nre = %v", self.re)
 				panic("Implementation error: re was not empty when processing token 'e' during read_message")
 			}
-			if is_psk_pattern(self.message_patterns) {
+			if self.message_pattern.is_psk {
 				symmetricstate_MixKey(&self.symmetricstate, re)
 			}
 
@@ -1017,9 +985,9 @@ handshakestate_read_message :: proc(self: ^HandshakeState, message: []u8)  -> ([
 		}
 	}
 
-	if self.current_pattern == len(self.message_patterns.messages) {
+	if self.current_token == len(self.message_pattern.messages) {
 		c1, c2 := symmetricstate_Split(&self.symmetricstate)
-		self.current_pattern = 0
+		self.current_token = 0
 		free_all(self.symmetricstate.allocator)
 		return payload_buffer, c1, c2, .Handshake_Complete
 	} else {

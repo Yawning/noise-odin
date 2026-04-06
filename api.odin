@@ -55,8 +55,8 @@ HandshakeState :: struct {
 	rs: Maybe(ecdh.Public_Key),
 	re: Maybe(ecdh.Public_Key),
 	initiator: bool,
-	message_patterns: ^MessagePattern,
-	current_pattern: int,
+	message_pattern: ^Message_Pattern,
+	current_token: int,
 	psk: [32]u8,
 }
 

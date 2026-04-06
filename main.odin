@@ -29,16 +29,16 @@ test_1000_random_protocols :: proc() {
 		res_rs : Maybe(ecdh.Public_Key) = nil
 		pattern := HANDSHAKE_PATTERNS[protocol.handshake_pattern]
 		fmt.sbprintfln(&test_log, "%v", pattern)
-		if slice.contains(pattern.pre_messages, PreToken.res_s) {
+		if slice.contains(pattern.pre_messages, Pre_Token.res_s) {
 			fmt.sbprintfln(&test_log, "here")
 			ini_rs = responder_s.public
 		}
-		if slice.contains(pattern.pre_messages, PreToken.ini_s){
+		if slice.contains(pattern.pre_messages, Pre_Token.ini_s){
 			res_rs = initiator_s.public
 		}
 
 		psk : [32]u8
-		if is_psk_pattern(pattern) {
+		if pattern.is_psk {
 			crypto.rand_bytes(psk[:])
 		}
 
@@ -139,15 +139,15 @@ test_one_protocol :: proc(protocol_name: string) -> (CipherStates, CipherStates)
 	time.stopwatch_reset(&sw)
 
 	time.stopwatch_start(&sw)
-	if slice.contains(pattern.pre_messages, PreToken.res_s) {
+	if slice.contains(pattern.pre_messages, Pre_Token.res_s) {
 		ini_rs = responder_s.public
 	}
-	if slice.contains(pattern.pre_messages, PreToken.ini_s){
+	if slice.contains(pattern.pre_messages, Pre_Token.ini_s){
 		res_rs = initiator_s.public
 	}
 
 	psk : [32]u8
-	if is_psk_pattern(pattern) {
+	if pattern.is_psk {
 		crypto.rand_bytes(psk[:])
 	}
 
