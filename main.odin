@@ -1,13 +1,15 @@
 package noise
 
+import "core:crypto"
+import "core:crypto/aead"
+import "core:crypto/ecdh"
+import "core:crypto/hash"
 import "core:fmt"
+import "core:math/rand"
+import "core:mem"
 import "core:strings"
 import "core:slice"
 import "core:time"
-import "core:crypto/ecdh"
-import "core:crypto"
-import "core:math/rand"
-import "core:mem"
 
 test_1000_random_protocols :: proc() {
 	test_log := strings.builder_make()
@@ -237,20 +239,41 @@ test_1000_messages :: proc(ini_cstates: ^CipherStates, res_cstates: ^CipherState
 }
 
 random_protocol :: proc() -> Protocol {
-	cipher  := CipherType(rand.int_range(0, len(CipherType)))
-	dh	  := DhType(rand.int_range(0, len(DhType)))
-	hash	:= HashType(rand.int_range(0, len(HashType)))
+	cipher  := random_cipher()
+	dh      := random_dh()
+	hash	:= random_hash()
 	HandP   := Handshake_Pattern(rand.int_range(1, len(Handshake_Pattern)))
 	return Protocol {
 		cipher = cipher,
-		dh = dhtype_to_curve(dh),
+		dh = dh,
 		hash = hash,
 		handshake_pattern = HandP,
 	}
 }
 
-// example_usage :: proc() {
-// }
+random_cipher :: proc() -> aead.Algorithm {
+	if rand.int_max(2) == 0 {
+		return .AES_GCM_256
+	}
+	return .CHACHA20POLY1305
+}
+
+random_dh :: proc() -> ecdh.Curve {
+	if rand.int_max(2) == 0 {
+		return .X25519
+	}
+	return .X448
+}
+
+random_hash :: proc() -> hash.Algorithm {
+	switch rand.int_max(4) {
+	case 0: return .SHA256
+	case 1: return .SHA512
+	case 2: return .BLAKE2S
+	case 3: return .BLAKE2B
+	case: return .Invalid
+	}
+}
 
 benchmark_dh :: proc() {
 	allo : mem.Dynamic_Arena

@@ -1,64 +1,29 @@
 package noise
 
 import "core:crypto"
-import "core:crypto/hash"
 import "core:crypto/aead"
 import "core:crypto/ecdh"
-
+import "core:crypto/hash"
+import "core:mem"
 import "core:slice"
 import "core:strings"
 
-import "core:mem"
-
 import "core:fmt"
-
-DhType :: enum u8 {
-	x25519,
-	x448,
-}
-
-CipherType :: enum u8 {
-	AES256gcm,
-	ChaChaPoly,
-}
-
-HashType :: enum u8 {
-	SHA256,
-	SHA512,
-	Blake2s,
-	Blake2b,
-}
 
 MAX_DHLEN :: 56
 MAX_HASHLEN :: 64
 MAX_BLOCKLEN :: 128
 
 DhLen :: proc(dh: ecdh.Curve) -> int {
-	#partial switch dh {
-	case .X25519: return 32
-	case .X448:   return 56
-	}
-	return 0
+	return ecdh.PUBLIC_KEY_SIZES[dh]
 }
 
-HashLen :: proc(hash: HashType) -> int {
-	switch hash {
-	case .SHA256:  return 32
-	case .SHA512:  return 64
-	case .Blake2s: return 32
-	case .Blake2b: return 64
-	}
-	return 0
+HashLen :: proc(h: hash.Algorithm) -> int {
+	return hash.DIGEST_SIZES[h]
 }
 
-BlockLen ::  proc(hash: HashType) -> int {
-	switch hash {
-	case .SHA256:  return 64
-	case .SHA512:  return 128
-	case .Blake2s: return 64
-	case .Blake2b: return 128
-	}
-	return 0
+BlockLen :: proc(h: hash.Algorithm) -> int {
+	return hash.BLOCK_SIZES[h]
 }
 
 // The HMAC padding strings
@@ -68,10 +33,10 @@ IPAD : [MAX_BLOCKLEN]u8 = {0..<MAX_BLOCKLEN = 0x36}
 OPAD : [MAX_BLOCKLEN]u8 = {0..<MAX_BLOCKLEN = 0x5c}
 
 Protocol :: struct {
-	dh: ecdh.Curve,
 	handshake_pattern: Handshake_Pattern,
-	cipher: CipherType,
-	hash: HashType,
+	dh: ecdh.Curve,
+	cipher: aead.Algorithm,
+	hash: hash.Algorithm,
 }
 
 // XXX: We are not *THAT* opinionated, yeet.
@@ -80,15 +45,15 @@ DEFAULT_PROTOCOL_NAME :: "Noise_XX_25519_AESGCM_SHA256"
 DEFAULT_PROTOCOL :: Protocol {
 	handshake_pattern = .XX,
 	dh = .X25519,
-	cipher = .AES256gcm,
+	cipher = .AES_GCM_256,
 	hash = .SHA256,
 }
 
 ERROR_PROTOCOL :: Protocol {
-	handshake_pattern = nil,
-	dh = nil,
-	cipher = nil,
-	hash = nil,
+	handshake_pattern = .Invalid,
+	dh = .Invalid,
+	cipher = .Invalid,
+	hash = .Invalid,
 }
 
 parse_protocol_string :: proc (protocol_string: string) -> (Protocol, NoiseStatus) {
@@ -155,50 +120,49 @@ parse_protocol_string :: proc (protocol_string: string) -> (Protocol, NoiseStatu
 	}
 
 	switch protocol_string[underline[2]+1 : underline[3]] {
-	case "AESGCM": protocol.cipher = .AES256gcm
-	case "ChaChaPoly": protocol.cipher = .ChaChaPoly
+	case "AESGCM": protocol.cipher = .AES_GCM_256
+	case "ChaChaPoly": protocol.cipher = .CHACHA20POLY1305
 	case: return ERROR_PROTOCOL, .Protocol_could_not_be_parsed
 	}
 
 	switch protocol_string[underline[3]+1 : ] {
 	case "SHA512": protocol.hash = .SHA512
 	case "SHA256": protocol.hash = .SHA256
-	case "Blake2s": protocol.hash = .Blake2s
-	case "Blake2b": protocol.hash = .Blake2b
+	case "Blake2s": protocol.hash = .BLAKE2S
+	case "Blake2b": protocol.hash = .BLAKE2B
 	case: return ERROR_PROTOCOL, .Protocol_could_not_be_parsed
 	}
 
 	return protocol, .Ok
 }
 
-dhtype_to_curve :: proc(dh: DhType) -> ecdh.Curve {
-	crv : ecdh.Curve
-	switch dh {
-	case .x25519: crv = .X25519
-	case .x448: crv = .X448
-	}
-	return crv
-}
-
-// This function will panic if passed an unsupported dh curve
+// This function will panic if passed and invalid protocol.
 protocol_text_from_struct :: proc(protocol: Protocol, allocator := context.allocator) -> string {
 	s := strings.builder_make()
 
 	hp := protocol.handshake_pattern
-	dh : string
+	dh: string
 	#partial switch protocol.dh {
 	case .X25519: dh = "25519"
 	case .X448: dh = "448"
-	case .Invalid: panic("Unsupported DH curve passed to printer function")
+	case: panic("unsupported DH curve passed to printer function")
 	}
 
-	c : string
-	switch protocol.cipher {
-	case .AES256gcm: c = "AESGCM"
-	case .ChaChaPoly: c = "ChaChaPoly"
+	c: string
+	#partial switch protocol.cipher {
+	case .AES_GCM_256: c = "AESGCM"
+	case .CHACHA20POLY1305: c = "ChaChaPoly"
+	case: panic("unsupported cipher passed to printer function")
 	}
 
-	h := protocol.hash
+	h: string
+	#partial switch protocol.hash {
+	case .SHA256: h = "SHA256"
+	case .SHA512: h = "SHA512"
+	case .BLAKE2S: h = "Blake2s"
+	case .BLAKE2B: h = "Blake2b"
+	case: panic("unsupported hash passed to printer function")
+	}
 
 	fmt.sbprintf(&s, "Noise_%v_%v_%v_%v", hp, dh, c, h)
 
@@ -214,10 +178,9 @@ GENERATE_KEYPAIR :: proc(protocol: Protocol) -> KeyPair {
 }
 
 keypair_random :: proc(protocol: Protocol) -> KeyPair {
-	curve : ecdh.Curve
+	curve := protocol.dh
 	#partial switch protocol.dh {
-	case .X25519: curve = .X25519
-	case .X448: curve = .X448
+	case .X25519, .X448:
 	case: panic("unsupported DH curve in protocol")
 	}
 	private : ecdh.Private_Key
@@ -248,7 +211,7 @@ keypair_random :: proc(protocol: Protocol) -> KeyPair {
 // on invalid input. Invalid input signals an implementation error which
 // should be caught in testing
 DH :: proc(key_pair: ^KeyPair, their_public_key: ^ecdh.Public_Key, allocator: mem.Allocator) -> []u8 {
-	dst := make([]u8, DhLen(key_pair.private._curve), )
+	dst := make([]u8, DhLen(key_pair.private._curve))
 	success := ecdh.ecdh(&key_pair.private, their_public_key, dst[:])
 
 	if !success {
@@ -259,8 +222,6 @@ DH :: proc(key_pair: ^KeyPair, their_public_key: ^ecdh.Public_Key, allocator: me
 
 	return dst
 }
-
-
 
 // Encrypts plaintext using the cipher key k of 32 bytes and an 8-byte
 // unsigned integer nonce n which must be unique for the key k.
@@ -284,13 +245,7 @@ ENCRYPT :: proc(k: [32]u8, n: u64, ad: []u8, plaintext: []u8, protocol: Protocol
 
 	iv := nonce_from_u64(n)
 
-	algo : aead.Algorithm
-	switch protocol.cipher {
-	case .AES256gcm: algo = .AES_GCM_256
-	case .ChaChaPoly: algo = .CHACHA20POLY1305
-	}
-
-	aead.init(&ctx, algo, k[:])
+	aead.init(&ctx, protocol.cipher, k[:])
 	aead.seal_ctx(&ctx, plaintext, tag[:], iv[:], ad, plaintext)
 
 	ciphertext.tag = tag
@@ -311,13 +266,7 @@ DECRYPT :: proc(k: [32]u8, n: u64, ad: []u8, ciphertext: CryptoBuffer, protocol:
 	iv := nonce_from_u64(n)
 	tag := ciphertext.tag
 
-	algo : aead.Algorithm
-	switch protocol.cipher {
-	case .AES256gcm: algo = .AES_GCM_256
-	case .ChaChaPoly: algo = .CHACHA20POLY1305
-	}
-
-	aead.init(&ctx, algo, k[:])
+	aead.init(&ctx, protocol.cipher, k[:])
 	if aead.open_ctx(&ctx, ciphertext.main_body, iv[:], ad, ciphertext.main_body, tag[:]) {
 		return ciphertext.main_body, .Ok
 	} else {
@@ -328,16 +277,8 @@ DECRYPT :: proc(k: [32]u8, n: u64, ad: []u8, ciphertext: CryptoBuffer, protocol:
 // Hashes some arbitrary-length data with a collision-resistant cryptographic
 // hash function and returns an output of HASHLEN bytes.
 HASH :: proc(allocator: mem.Allocator, protocol: Protocol, data: ..[]u8) -> []u8 {
-	algo : hash.Algorithm
-	switch protocol.hash {
-	case .SHA256: algo = .SHA256
-	case .SHA512: algo = .SHA512
-	case .Blake2s: algo = .BLAKE2S
-	case .Blake2b: algo = .BLAKE2B
-	}
-
 	ctx : hash.Context
-	hash.init(&ctx, algo)
+	hash.init(&ctx, protocol.hash)
 	for datum in data {
 		hash.update(&ctx, datum)
 	}
