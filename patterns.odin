@@ -1,4 +1,4 @@
-package internals
+package noise
 
 // ------------- ONE WAY PATTERNS ---------------------------------------------------------
 

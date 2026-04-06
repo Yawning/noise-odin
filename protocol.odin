@@ -1,4 +1,4 @@
-package internals
+package noise
 
 import "core:crypto"
 import "core:crypto/hash"
@@ -11,21 +11,6 @@ import "core:strings"
 import "core:mem"
 
 import "core:fmt"
-
-
-MAX_PACKET_SIZE :: 65535
-
-NoiseStatus :: enum {
-	Ok,
-	Decryption_failed_to_authenticate,
-	Protocol_could_not_be_parsed,
-	Pending_Handshake,
-	Handshake_Complete,
-	rs_not_set_for_s_pre_message,
-	out_of_memory,
-	invalid_message_passed_to_read_message,
-	tried_to_encrypt_message_bigger_than_MAX_PACKET_SIZE,
-}
 
 DhType :: enum u8 {
 	x25519,
@@ -135,6 +120,7 @@ Protocol :: struct {
 	hash: HashType,
 }
 
+// XXX: We are not *THAT* opinionated, yeet.
 DEFAULT_PROTOCOL_NAME :: "Noise_XX_25519_AESGCM_SHA256"
 
 DEFAULT_PROTOCOL :: Protocol {
@@ -289,7 +275,7 @@ protocol_text_from_struct :: proc(protocol: Protocol, allocator := context.alloc
 	#partial switch protocol.dh {
 	case .X25519: dh = "25519"
 	case .X448: dh = "448"
-	case .Invalid: panic("Unsupported DH curve passed to printer function")	
+	case .Invalid: panic("Unsupported DH curve passed to printer function")
 	}
 
 	c : string
@@ -311,11 +297,6 @@ protocol_text_from_struct :: proc(protocol: Protocol, allocator := context.alloc
 // encoding details are specific to each set of DH functions.
 GENERATE_KEYPAIR :: proc(protocol: Protocol) -> KeyPair {
 	return keypair_random(protocol)
-}
-
-KeyPair :: struct {
-	public: ecdh.Public_Key,
-	private: ecdh.Private_Key,
 }
 
 keypair_random :: proc(protocol: Protocol) -> KeyPair {
@@ -365,12 +346,7 @@ DH :: proc(key_pair: ^KeyPair, their_public_key: ^ecdh.Public_Key, allocator: me
 	return dst
 }
 
-// Keeps track of the 16 byte tag without relying on the input plaintext
-// having a spare 16 byte capacity
-CryptoBuffer :: struct {
-	main_body: []u8,
-	tag: [16]u8,
-}
+
 
 // Encrypts plaintext using the cipher key k of 32 bytes and an 8-byte
 // unsigned integer nonce n which must be unique for the key k.
@@ -539,32 +515,6 @@ is_psk_pattern :: proc(pattern: MessagePattern) -> bool {
 	}
 
 	return false
-}
-
-CipherState :: struct {
-	protocol: Protocol,
-	k: [32]u8,
-	n: u64,
-}
-
-SymmetricState :: struct {
-	cipherstate: CipherState,
-	ck: []u8,
-	h: []u8,
-	allocator: mem.Allocator,
-	backing: ^mem.Dynamic_Arena,
-}
-
-HandshakeState :: struct {
-	symmetricstate: SymmetricState,
-	s: Maybe(KeyPair),
-	e: Maybe(KeyPair),
-	rs: Maybe(ecdh.Public_Key),
-	re: Maybe(ecdh.Public_Key),
-	initiator: bool,
-	message_patterns: MessagePattern,
-	current_pattern: int,
-	psk: [32]u8,
 }
 
 get_curve :: proc(handshake_state: ^HandshakeState) -> ecdh.Curve {

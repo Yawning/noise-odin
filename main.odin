@@ -9,8 +9,6 @@ import "core:crypto"
 import "core:math/rand"
 import "core:mem"
 
-import "internals"
-
 test_1000_random_protocols :: proc() {
 	test_log := strings.builder_make()
 
@@ -20,31 +18,31 @@ test_1000_random_protocols :: proc() {
 	for i in 0..<1000 {
 
 		protocol := random_protocol()
-		protocol_name := internals.protocol_text_from_struct(protocol)
+		protocol_name := protocol_text_from_struct(protocol)
 		// protocol_name := "Noise_INpsk2_448_AESGCM_SHA256"
 		// protocol, parse_error := parse_protocol_string(protocol_name)
 		// fmt.println(protocol_name)
 		fmt.sbprintfln(&test_log, protocol_name)
-		initiator_s := internals.GENERATE_KEYPAIR(protocol)
-		responder_s := internals.GENERATE_KEYPAIR(protocol)
+		initiator_s := GENERATE_KEYPAIR(protocol)
+		responder_s := GENERATE_KEYPAIR(protocol)
 		ini_rs : Maybe(ecdh.Public_Key) = nil
 		res_rs : Maybe(ecdh.Public_Key) = nil
-		pattern := internals.map_pattern(protocol.handshake_pattern)
+		pattern := map_pattern(protocol.handshake_pattern)
 		fmt.sbprintfln(&test_log, "%v", pattern)
-		if slice.contains(pattern.pre_messages, internals.PreToken.res_s) {
+		if slice.contains(pattern.pre_messages, PreToken.res_s) {
 			fmt.sbprintfln(&test_log, "here")
 			ini_rs = responder_s.public
 		}
-		if slice.contains(pattern.pre_messages, internals.PreToken.ini_s){
+		if slice.contains(pattern.pre_messages, PreToken.ini_s){
 			res_rs = initiator_s.public
 		}
 
 		psk : [32]u8
-		if internals.is_psk_pattern(pattern) {
+		if is_psk_pattern(pattern) {
 			crypto.rand_bytes(psk[:])
 		}
 
-		initiator_handshakestate, ini_ini_status := internals.handshakestate_initialize(
+		initiator_handshakestate, ini_ini_status := handshakestate_initialize(
 			true,
 			nil,
 			initiator_s,
@@ -54,7 +52,7 @@ test_1000_random_protocols :: proc() {
 			protocol_name = protocol_name,
 			psk = psk,
 		)
-		responder_handshakestate, res_ini_status := internals.handshakestate_initialize(
+		responder_handshakestate, res_ini_status := handshakestate_initialize(
 			false,
 			nil,
 			responder_s,
@@ -86,7 +84,7 @@ test_1000_random_protocols :: proc() {
 		if ini_cstates.c1_i_to_r != res_cstates.c1_i_to_r {any_test_failed = true}
 		if ini_cstates.c2_r_to_i != res_cstates.c2_r_to_i {any_test_failed = true}
 
-		og_test_data := make([]u8, rand.int_range(128, internals.MAX_PACKET_SIZE-16))
+		og_test_data := make([]u8, rand.int_range(128, MAX_PACKET_SIZE-16))
 		defer delete(og_test_data)
 		crypto.rand_bytes(og_test_data[:])
 		backup_og := slice.clone(og_test_data)
@@ -99,8 +97,8 @@ test_1000_random_protocols :: proc() {
 
 		test_1000_messages(&ini_cstates, &res_cstates)
 
-		internals.handshakestate_destroy(&initiator_handshakestate)
-		internals.handshakestate_destroy(&responder_handshakestate)
+		handshakestate_destroy(&initiator_handshakestate)
+		handshakestate_destroy(&responder_handshakestate)
 		if i%100 == 0 {
 			fmt.println(i)
 		}
@@ -130,30 +128,30 @@ test_one_protocol :: proc(protocol_name: string) -> (CipherStates, CipherStates)
 	time.stopwatch_start(&sw)
 	protocol, parse_error := parse_protocol_string(protocol_name)
 
-	initiator_s := internals.GENERATE_KEYPAIR(protocol)
-	responder_s := internals.GENERATE_KEYPAIR(protocol)
+	initiator_s := GENERATE_KEYPAIR(protocol)
+	responder_s := GENERATE_KEYPAIR(protocol)
 	ini_rs : Maybe(ecdh.Public_Key) = nil
 	res_rs : Maybe(ecdh.Public_Key) = nil
-	pattern := internals.map_pattern(protocol.handshake_pattern)
+	pattern := map_pattern(protocol.handshake_pattern)
 	time.stopwatch_stop(&sw)
 	fmt.println("time 1: ", time.stopwatch_duration(sw))
 
 	time.stopwatch_reset(&sw)
 
 	time.stopwatch_start(&sw)
-	if slice.contains(pattern.pre_messages, internals.PreToken.res_s) {
+	if slice.contains(pattern.pre_messages, PreToken.res_s) {
 		ini_rs = responder_s.public
 	}
-	if slice.contains(pattern.pre_messages, internals.PreToken.ini_s){
+	if slice.contains(pattern.pre_messages, PreToken.ini_s){
 		res_rs = initiator_s.public
 	}
 
 	psk : [32]u8
-	if internals.is_psk_pattern(pattern) {
+	if is_psk_pattern(pattern) {
 		crypto.rand_bytes(psk[:])
 	}
 
-	initiator_handshakestate, ini_ini_status := internals.handshakestate_initialize(
+	initiator_handshakestate, ini_ini_status := handshakestate_initialize(
 		true,
 		nil,
 		initiator_s,
@@ -163,7 +161,7 @@ test_one_protocol :: proc(protocol_name: string) -> (CipherStates, CipherStates)
 		protocol_name = protocol_name,
 		psk = psk,
 	)
-	responder_handshakestate, res_ini_status := internals.handshakestate_initialize(
+	responder_handshakestate, res_ini_status := handshakestate_initialize(
 		false,
 		nil,
 		responder_s,
@@ -238,14 +236,14 @@ test_1000_messages :: proc(ini_cstates: ^CipherStates, res_cstates: ^CipherState
 	}
 }
 
-random_protocol :: proc() -> internals.Protocol {
-	cipher  := internals.CipherType(rand.int_range(0, len(internals.CipherType)))
-	dh	  := internals.DhType(rand.int_range(0, len(internals.DhType)))
-	hash	:= internals.HashType(rand.int_range(0, len(internals.HashType)))
-	HandP   := internals.HandshakePattern(rand.int_range(0, len(internals.HandshakePattern)))
-	return internals.Protocol {
+random_protocol :: proc() -> Protocol {
+	cipher  := CipherType(rand.int_range(0, len(CipherType)))
+	dh	  := DhType(rand.int_range(0, len(DhType)))
+	hash	:= HashType(rand.int_range(0, len(HashType)))
+	HandP   := HandshakePattern(rand.int_range(0, len(HandshakePattern)))
+	return Protocol {
 		cipher = cipher,
-		dh = internals.dhtype_to_curve(dh),
+		dh = dhtype_to_curve(dh),
 		hash = hash,
 		handshake_pattern = HandP,
 	}
@@ -261,14 +259,14 @@ benchmark_dh :: proc() {
 
 	protocol := DEFAULT_PROTOCOL
 
-	p1 := internals.GENERATE_KEYPAIR(protocol)
-	p2 := internals.GENERATE_KEYPAIR(protocol)
+	p1 := GENERATE_KEYPAIR(protocol)
+	p2 := GENERATE_KEYPAIR(protocol)
 
 	sw : time.Stopwatch
 	time.stopwatch_start(&sw)
 	outputs : [1000][]u8
 	for i in 0..<1000 {
-		outputs[i] = internals.DH(&p1, &p2.public, allocator)
+		outputs[i] = DH(&p1, &p2.public, allocator)
 	}
 	time.stopwatch_stop(&sw)
 	fmt.println("Time dh: ", time.stopwatch_duration(sw) / 1000)
@@ -290,7 +288,7 @@ benchmark_hash :: proc() {
 	time.stopwatch_start(&sw)
 	outputs : [1000][]u8
 	for i in 0..<1000 {
-		outputs[i] = internals.HASH(allocator, protocol, h1[:], h2[:])
+		outputs[i] = HASH(allocator, protocol, h1[:], h2[:])
 	}
 	time.stopwatch_stop(&sw)
 	fmt.println("Time hash: ", time.stopwatch_duration(sw) / 1000)
@@ -317,7 +315,7 @@ benchmark_cipher :: proc() {
 
 	outputs : [1000]CryptoBuffer
 	for i in 0..<1000 {
-		outputs[i], _ = internals.ENCRYPT(k, u64(i), nil, plaintexts[i][:], protocol)
+		outputs[i], _ = ENCRYPT(k, u64(i), nil, plaintexts[i][:], protocol)
 	}
 	time.stopwatch_stop(&sw)
 	fmt.println("Time cipher: ", time.stopwatch_duration(sw) / 1000)
@@ -326,7 +324,7 @@ benchmark_cipher :: proc() {
 main :: proc() {
 
 	protocol_name := "Noise_NKpsk2_448_AESGCM_Blake2b"
-	protocol, status := internals.parse_protocol_string(protocol_name)
+	protocol, status := parse_protocol_string(protocol_name)
 	fmt.println(protocol_name)
 	ini_cstates, res_cstates := test_one_protocol(protocol_name)
 
