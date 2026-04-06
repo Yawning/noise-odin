@@ -213,6 +213,7 @@ PATTERN_IX :  MessagePattern = {
 // NNpsk0:
 //   -> psk, e
 //   <- e, ee
+@(rodata)
 PATTERN_NNpsk0 : MessagePattern = {
 	pre_messages = nil,
 	messages = {
@@ -224,6 +225,7 @@ PATTERN_NNpsk0 : MessagePattern = {
 // NNpsk2:
 //   -> e
 //   <- e, ee, psk
+@(rodata)
 PATTERN_NNpsk2 : MessagePattern = {
 	pre_messages = nil,
 	messages = {
@@ -237,6 +239,7 @@ PATTERN_NNpsk2 : MessagePattern = {
 //   ...
 //   -> psk, e, es
 //   <- e, ee
+@(rodata)
 PATTERN_NKpsk0 : MessagePattern = {
 	pre_messages = {.res_s},
 	messages = {
@@ -250,6 +253,7 @@ PATTERN_NKpsk0 : MessagePattern = {
 //   ...
 //   -> e, es
 //   <- e, ee, psk
+@(rodata)
 PATTERN_NKpsk2 : MessagePattern = {
 	pre_messages = {.res_s},
 	messages = {
@@ -261,6 +265,7 @@ PATTERN_NKpsk2 : MessagePattern = {
 //  NXpsk2:
 //	-> e
 //	<- e, ee, s, es, psk
+@(rodata)
 PATTERN_NXpsk2 : MessagePattern = {
 	pre_messages = nil,
 	messages = {
@@ -273,6 +278,7 @@ PATTERN_NXpsk2 : MessagePattern = {
 //	-> e
 //	<- e, ee
 //	-> s, se, psk
+@(rodata)
 PATTERN_XNpsk3 : MessagePattern = {
 	pre_messages = nil,
 	messages = {
@@ -288,6 +294,7 @@ PATTERN_XNpsk3 : MessagePattern = {
 //	-> e, es
 //	<- e, ee
 //	-> s, se, psk
+@(rodata)
 PATTERN_XKpsk3 : MessagePattern = {
 	pre_messages = {.res_s},
 	messages = {
@@ -301,6 +308,7 @@ PATTERN_XKpsk3 : MessagePattern = {
 //	-> e
 //	<- e, ee, s, es
 //	-> s, se, psk
+@(rodata)
 PATTERN_XXpsk3 : MessagePattern = {
 	pre_messages = nil,
 	messages = {
@@ -315,6 +323,7 @@ PATTERN_XXpsk3 : MessagePattern = {
 //	 ...
 //	 -> psk, e
 //	 <- e, ee, se
+@(rodata)
 PATTERN_KNpsk0 : MessagePattern = {
 	pre_messages = {.ini_s},
 	messages = {
@@ -328,6 +337,7 @@ PATTERN_KNpsk0 : MessagePattern = {
 //	 ...
 //	 -> e
 //	 <- e, ee, se, psk
+@(rodata)
 PATTERN_KNpsk2 : MessagePattern = {
 	pre_messages = {.ini_s},
 	messages = {
@@ -342,6 +352,7 @@ PATTERN_KNpsk2 : MessagePattern = {
 //	 ...
 //	 -> psk, e, es, ss
 //	 <- e, ee, se
+@(rodata)
 PATTERN_KKpsk0 : MessagePattern = {
 	pre_messages = {.ini_s, .res_s},
 	messages = {
@@ -356,6 +367,7 @@ PATTERN_KKpsk0 : MessagePattern = {
 //	 ...
 //	 -> e, es, ss
 //	 <- e, ee, se, psk
+@(rodata)
 PATTERN_KKpsk2 : MessagePattern = {
 	pre_messages = {.ini_s, .res_s},
 	messages = {
@@ -369,6 +381,7 @@ PATTERN_KKpsk2 : MessagePattern = {
 //	  ...
 //	  -> e
 //	  <- e, ee, se, s, es, psk
+@(rodata)
 PATTERN_KXpsk2 : MessagePattern = {
 	pre_messages = {.ini_s},
 	messages = {
@@ -380,6 +393,7 @@ PATTERN_KXpsk2 : MessagePattern = {
 //	INpsk1:
 //	  -> e, s, psk
 //	  <- e, ee, se
+@(rodata)
 PATTERN_INpsk1 : MessagePattern = {
 	pre_messages = nil,
 	messages = {
@@ -391,6 +405,7 @@ PATTERN_INpsk1 : MessagePattern = {
 //	INpsk2:
 //	  -> e, s
 //	  <- e, ee, se, psk
+@(rodata)
 PATTERN_INpsk2 : MessagePattern = {
 	pre_messages = nil,
 	messages = {
@@ -404,6 +419,7 @@ PATTERN_INpsk2 : MessagePattern = {
 //	  ...
 //	  -> e, es, s, ss, psk
 //	  <- e, ee, se
+@(rodata)
 PATTERN_IKpsk1 : MessagePattern = {
 	pre_messages = {.res_s},
 	messages = {
@@ -417,6 +433,7 @@ PATTERN_IKpsk1 : MessagePattern = {
 //	  ...
 //	  -> e, es, s, ss
 //	  <- e, ee, se, psk
+@(rodata)
 PATTERN_IKpsk2 : MessagePattern = {
 	pre_messages = {.res_s},
 	messages = {
@@ -428,6 +445,7 @@ PATTERN_IKpsk2 : MessagePattern = {
 //	IXpsk2:
 //	  -> e, s
 //	  <- e, ee, se, s, es, psk
+@(rodata)
 PATTERN_IXpsk2 : MessagePattern = {
 	pre_messages = nil,
 	messages = {
