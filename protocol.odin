@@ -67,47 +67,6 @@ IPAD : [MAX_BLOCKLEN]u8 = {0..<MAX_BLOCKLEN = 0x36}
 @(rodata)
 OPAD : [MAX_BLOCKLEN]u8 = {0..<MAX_BLOCKLEN = 0x5c}
 
-
-// Supported handshake patterns will be listed here.
-HandshakePattern :: enum {
-	// One way patterns
-	N,
-	K,
-	X,
-	// Fundamental patterns
-	XX,
-	NK,
-	NN,
-	KN,
-	KK,
-	NX,
-	KX,
-	XN,
-	IN,
-	XK,
-	IK,
-	IX,
-	// psk patterns
-	NNpsk0,
-	NNpsk2,
-	NKpsk0,
-	NKpsk2,
-	NXpsk2,
-	XNpsk3,
-	XKpsk3,
-	XXpsk3,
-	KNpsk0,
-	KNpsk2,
-	KKpsk0,
-	KKpsk2,
-	KXpsk2,
-	INpsk1,
-	INpsk2,
-	IKpsk1,
-	IKpsk2,
-	IXpsk2,
-}
-
 MessagePattern :: struct {
 	pre_messages : []PreToken,
 	messages : [][]Token,
@@ -115,7 +74,7 @@ MessagePattern :: struct {
 
 Protocol :: struct {
 	dh: ecdh.Curve,
-	handshake_pattern: HandshakePattern,
+	handshake_pattern: Handshake_Pattern,
 	cipher: CipherType,
 	hash: HashType,
 }
@@ -215,46 +174,6 @@ parse_protocol_string :: proc (protocol_string: string) -> (Protocol, NoiseStatu
 	}
 
 	return protocol, .Ok
-}
-
-map_pattern :: proc(p: HandshakePattern) -> MessagePattern {
-	message_pattern : MessagePattern
-	switch p {
-	case .N : message_pattern = PATTERN_N
-	case .K : message_pattern = PATTERN_K
-	case .X : message_pattern = PATTERN_X
-	case .XX: message_pattern = PATTERN_XX
-	case .NK: message_pattern = PATTERN_NK
-	case .NN: message_pattern = PATTERN_NN
-	case .KN: message_pattern = PATTERN_KN
-	case .KK: message_pattern = PATTERN_KK
-	case .NX: message_pattern = PATTERN_NX
-	case .KX: message_pattern = PATTERN_KX
-	case .XN: message_pattern = PATTERN_XN
-	case .IN: message_pattern = PATTERN_IN
-	case .XK: message_pattern = PATTERN_XK
-	case .IK: message_pattern = PATTERN_IK
-	case .IX: message_pattern = PATTERN_IX
-	case .NNpsk0: message_pattern = PATTERN_NNpsk0
-	case .NNpsk2: message_pattern = PATTERN_NNpsk2
-	case .NKpsk0: message_pattern = PATTERN_NKpsk0
-	case .NKpsk2: message_pattern = PATTERN_NKpsk2
-	case .NXpsk2: message_pattern = PATTERN_NXpsk2
-	case .XNpsk3: message_pattern = PATTERN_XNpsk3
-	case .XKpsk3: message_pattern = PATTERN_XKpsk3
-	case .XXpsk3: message_pattern = PATTERN_XXpsk3
-	case .KNpsk0: message_pattern = PATTERN_KNpsk0
-	case .KNpsk2: message_pattern = PATTERN_KNpsk2
-	case .KKpsk0: message_pattern = PATTERN_KKpsk0
-	case .KKpsk2: message_pattern = PATTERN_KKpsk2
-	case .KXpsk2: message_pattern = PATTERN_KXpsk2
-	case .INpsk1: message_pattern = PATTERN_INpsk1
-	case .INpsk2: message_pattern = PATTERN_INpsk2
-	case .IKpsk1: message_pattern = PATTERN_IKpsk1
-	case .IKpsk2: message_pattern = PATTERN_IKpsk2
-	case .IXpsk2: message_pattern = PATTERN_IXpsk2
-	}
-	return message_pattern
 }
 
 dhtype_to_curve :: proc(dh: DhType) -> ecdh.Curve {
@@ -505,7 +424,7 @@ Token :: enum {
 	psk,
 }
 
-is_psk_pattern :: proc(pattern: MessagePattern) -> bool {
+is_psk_pattern :: proc(pattern: ^MessagePattern) -> bool {
 	for p in pattern.messages {
 		for m in p {
 			if m == .psk {
@@ -754,7 +673,7 @@ handshakestate_initialize :: proc(
 		return HandshakeState{}, status
 	}
 
-	message_pattern := map_pattern(symmetricstate.cipherstate.protocol.handshake_pattern)
+	message_pattern := HANDSHAKE_PATTERNS[symmetricstate.cipherstate.protocol.handshake_pattern]
 
 	if message_pattern.pre_messages != nil {
 		if initiator {

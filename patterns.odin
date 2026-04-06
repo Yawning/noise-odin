@@ -1,5 +1,83 @@
 package noise
 
+// Supported handshake patterns will be listed here.
+Handshake_Pattern :: enum {
+	Invalid,
+	// One way patterns
+	N,
+	K,
+	X,
+	// Fundamental patterns
+	XX,
+	NK,
+	NN,
+	KN,
+	KK,
+	NX,
+	KX,
+	XN,
+	IN,
+	XK,
+	IK,
+	IX,
+	// psk patterns
+	NNpsk0,
+	NNpsk2,
+	NKpsk0,
+	NKpsk2,
+	NXpsk2,
+	XNpsk3,
+	XKpsk3,
+	XXpsk3,
+	KNpsk0,
+	KNpsk2,
+	KKpsk0,
+	KKpsk2,
+	KXpsk2,
+	INpsk1,
+	INpsk2,
+	IKpsk1,
+	IKpsk2,
+	IXpsk2,
+}
+
+HANDSHAKE_PATTERNS := [Handshake_Pattern]^MessagePattern {
+	.Invalid = nil,
+	.N = &PATTERN_N,
+	.K = &PATTERN_K,
+	.X = &PATTERN_X,
+	.XX = &PATTERN_XX,
+	.NK = &PATTERN_NK,
+	.NN = &PATTERN_NN,
+	.KN = &PATTERN_KN,
+	.KK = &PATTERN_KK,
+	.NX = &PATTERN_NX,
+	.KX = &PATTERN_KX,
+	.XN = &PATTERN_XN,
+	.IN = &PATTERN_IN,
+	.XK = &PATTERN_XK,
+	.IK = &PATTERN_IK,
+	.IX = &PATTERN_IX,
+	.NNpsk0 = &PATTERN_NNpsk0,
+	.NNpsk2 = &PATTERN_NNpsk2,
+	.NKpsk0 = &PATTERN_NKpsk0,
+	.NKpsk2 = &PATTERN_NKpsk2,
+	.NXpsk2 = &PATTERN_NXpsk2,
+	.XNpsk3 = &PATTERN_XNpsk3,
+	.XKpsk3 = &PATTERN_XKpsk3,
+	.XXpsk3 = &PATTERN_XXpsk3,
+	.KNpsk0 = &PATTERN_KNpsk0,
+	.KNpsk2 = &PATTERN_KNpsk2,
+	.KKpsk0 = &PATTERN_KKpsk0,
+	.KKpsk2 = &PATTERN_KKpsk2,
+	.KXpsk2 = &PATTERN_KXpsk2,
+	.INpsk1 = &PATTERN_INpsk1,
+	.INpsk2 = &PATTERN_INpsk2,
+	.IKpsk1 = &PATTERN_IKpsk1,
+	.IKpsk2 = &PATTERN_IKpsk2,
+	.IXpsk2 = &PATTERN_IXpsk2,
+}
+
 // ------------- ONE WAY PATTERNS ---------------------------------------------------------
 
 // N:

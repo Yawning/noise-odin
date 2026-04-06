@@ -27,7 +27,7 @@ test_1000_random_protocols :: proc() {
 		responder_s := GENERATE_KEYPAIR(protocol)
 		ini_rs : Maybe(ecdh.Public_Key) = nil
 		res_rs : Maybe(ecdh.Public_Key) = nil
-		pattern := map_pattern(protocol.handshake_pattern)
+		pattern := HANDSHAKE_PATTERNS[protocol.handshake_pattern]
 		fmt.sbprintfln(&test_log, "%v", pattern)
 		if slice.contains(pattern.pre_messages, PreToken.res_s) {
 			fmt.sbprintfln(&test_log, "here")
@@ -132,7 +132,7 @@ test_one_protocol :: proc(protocol_name: string) -> (CipherStates, CipherStates)
 	responder_s := GENERATE_KEYPAIR(protocol)
 	ini_rs : Maybe(ecdh.Public_Key) = nil
 	res_rs : Maybe(ecdh.Public_Key) = nil
-	pattern := map_pattern(protocol.handshake_pattern)
+	pattern := HANDSHAKE_PATTERNS[protocol.handshake_pattern]
 	time.stopwatch_stop(&sw)
 	fmt.println("time 1: ", time.stopwatch_duration(sw))
 
@@ -240,7 +240,7 @@ random_protocol :: proc() -> Protocol {
 	cipher  := CipherType(rand.int_range(0, len(CipherType)))
 	dh	  := DhType(rand.int_range(0, len(DhType)))
 	hash	:= HashType(rand.int_range(0, len(HashType)))
-	HandP   := HandshakePattern(rand.int_range(0, len(HandshakePattern)))
+	HandP   := Handshake_Pattern(rand.int_range(1, len(Handshake_Pattern)))
 	return Protocol {
 		cipher = cipher,
 		dh = dhtype_to_curve(dh),
