@@ -4,6 +4,7 @@ import "core:crypto"
 import "core:crypto/aead"
 import "core:crypto/ecdh"
 import "core:crypto/hash"
+import "core:crypto/hkdf"
 import "core:encoding/endian"
 import "core:mem"
 import "core:slice"
@@ -13,7 +14,6 @@ import "core:fmt"
 
 MAX_DHLEN :: 56
 MAX_HASHLEN :: 64
-MAX_BLOCKLEN :: 128
 
 DhLen :: proc(dh: ecdh.Curve) -> int {
 	return ecdh.PUBLIC_KEY_SIZES[dh]
@@ -26,12 +26,6 @@ HashLen :: proc(h: hash.Algorithm) -> int {
 BlockLen :: proc(h: hash.Algorithm) -> int {
 	return hash.BLOCK_SIZES[h]
 }
-
-// The HMAC padding strings
-@(rodata)
-IPAD : [MAX_BLOCKLEN]u8 = {0..<MAX_BLOCKLEN = 0x36}
-@(rodata)
-OPAD : [MAX_BLOCKLEN]u8 = {0..<MAX_BLOCKLEN = 0x5c}
 
 Protocol :: struct {
 	handshake_pattern: Handshake_Pattern,
@@ -280,16 +274,13 @@ DECRYPT :: proc(k: [32]u8, n: u64, ad: []u8, ciphertext: CryptoBuffer, protocol:
 
 // Hashes some arbitrary-length data with a collision-resistant cryptographic
 // hash function and returns an output of HASHLEN bytes.
-HASH :: proc(allocator: mem.Allocator, protocol: Protocol, data: ..[]u8) -> []u8 {
+HASH :: proc(dst: []byte, protocol: ^Protocol, data: ..[]u8) {
 	ctx : hash.Context
 	hash.init(&ctx, protocol.hash)
 	for datum in data {
 		hash.update(&ctx, datum)
 	}
-	result, allocerror := make([]u8, HashLen(protocol.hash), allocator)
-	hash.final(&ctx, result)
-
-	return result
+	hash.final(&ctx, dst)
 }
 
 // Returns a new 32-byte cipher key as a pseudorandom function of k. If
@@ -308,20 +299,6 @@ REKEY :: proc(k: [32]u8, protocol: Protocol) -> [32]u8 {
 	return new_key
 }
 
-// HMAC-HASH(key, data): Applies HMAC from http://www.ietf.org/rfc/rfc5869.txt using the HASH() function.
-// This function is only called as part of HKDF(), below
-HMAC_HASH :: proc(K: []u8, text: []u8, protocol: Protocol, allocator: mem.Allocator) -> []u8 {
-	new_K := make([]u8, BlockLen(protocol.hash), allocator)
-	copy(new_K, K)
-
-	temp1 := array_xor(new_K, IPAD[ : BlockLen(protocol.hash)], allocator)
-	temp2 := array_xor(new_K, OPAD[ : BlockLen(protocol.hash)], allocator)
-
-	inner := HASH(allocator, protocol, temp1[:], text)
-	outer := HASH(allocator, protocol, temp2[:], inner[:])
-	return outer
-}
-
 // Takes a chaining_key byte sequence of length HASHLEN, and an
 // input_key_material byte sequence with length either zero bytes,
 // 32 bytes, or DHLEN bytes. Returns a pair or triple of byte sequences
@@ -336,17 +313,19 @@ HMAC_HASH :: proc(K: []u8, text: []u8, protocol: Protocol, allocator: mem.Alloca
 // Note that temp_key, output1, output2, and output3 are all HASHLEN
 // bytes in length. Also note that the HKDF() function is simply HKDF
 // from [4] with the chaining_key as HKDF salt, and zero-length HKDF info.
-HKDF :: proc(chaining_key: []u8, input_key_material: []u8, protocol: Protocol, allocator: mem.Allocator) -> ([]u8, []u8, []u8) {
+HKDF :: proc(dst, chaining_key, input_key_material: []byte, protocol: ^Protocol) -> ([]u8, []u8, []u8) {
 	assert(len(input_key_material) == 0 || len(input_key_material) == 32 || len(input_key_material) == DhLen(protocol.dh))
-	temp_key := HMAC_HASH(chaining_key, input_key_material, protocol, allocator)
-	output1 :=  HMAC_HASH(temp_key[:], {0x01}, protocol, allocator)
-	temp_bytes_2 := concat_bytes(output1[:], {0x02}, allocator)
-	output2 :=  HMAC_HASH(temp_key[:], temp_bytes_2 , protocol, allocator)
 
-	temp_bytes_3 := concat_bytes(output2[:], {0x03}, allocator)
-	output3 :=  HMAC_HASH(temp_key[:], temp_bytes_3, protocol, allocator)
+	hkdf.extract_and_expand(protocol.hash, chaining_key, input_key_material, nil, dst)
 
-	return output1, output2, output3
+	h_len := HashLen(protocol.hash)
+	assert(len(dst) == h_len * 2 || len(dst) == h_len * 3)
+
+	r1, r2 := dst[:h_len], dst[h_len:h_len*2]
+	if len(dst) == h_len * 2 {
+		return r1, r2, nil
+	}
+	return r1, r2, dst[h_len*2:]
 }
 
 get_curve :: proc(handshake_state: ^HandshakeState) -> ecdh.Curve {
@@ -434,28 +413,45 @@ symmetricstate_initialize_symmetric :: proc(protocol_name: string) -> (Symmetric
 		return SymmetricState{}, .Protocol_could_not_be_parsed
 	}
 
+	hash_len := HashLen(protocol.hash)
 	if len(protocol_name) < HashLen(protocol.hash) {
-		protocol_name_bytes := make([]u8, HashLen(protocol.hash), allocator)
-		copy(protocol_name_bytes[:], protocol_name[:])
-		h := HASH(allocator, protocol, protocol_name_bytes[:])
+		ss := SymmetricState{
+			cipherstate = cipherstate_InitializeKey(zeroslice, protocol),
+			allocator = allocator,
+			backing = backing,
+		}
 
-		cipherstate := cipherstate_InitializeKey(zeroslice, protocol)
-		return SymmetricState {cipherstate = cipherstate, ck = h, h = h, allocator = allocator, backing = backing}, .Ok
+		h := ss._h[:hash_len]
+		copy(h, protocol_name[:])
+		HASH(h, &protocol, h)
+		copy(ss._ck[:hash_len], h)
+
+		return ss, .Ok
 	} else {
-		h := HASH(allocator, protocol, transmute([]u8)protocol_name)
-		cipherstate := cipherstate_InitializeKey(zeroslice, protocol)
-		return SymmetricState {cipherstate = cipherstate, ck = h, h = h, allocator = allocator, backing = backing}, .Ok
+		ss := SymmetricState{
+			cipherstate = cipherstate_InitializeKey(zeroslice, protocol),
+			allocator = allocator,
+			backing = backing,
+		}
+
+		h := ss._h[:hash_len]
+		HASH(h, &protocol, transmute([]byte)protocol_name)
+		copy(ss._ck[:hash_len], h)
+		return ss, .Ok
 	}
 }
 
 // Sets h = HASH(h || data).
-symmetricstate_MixHash :: proc(self: ^SymmetricState, data: ..[]u8) {
+symmetricstate_MixHash :: proc(self: ^SymmetricState, data: ..[]byte) {
+	hash_len := HashLen(self.cipherstate.protocol.hash)
+
+	h := self._h[:hash_len]
 	if len(data) == 1 {
-		self.h = HASH(self.allocator, self.cipherstate.protocol, self.h, data[0])
+		HASH(h, &self.cipherstate.protocol, h, data[0])
 	} else if len(data) == 2 {
-		self.h = HASH(self.allocator, self.cipherstate.protocol, self.h, data[0], data[1])
+		HASH(h, &self.cipherstate.protocol, h, data[0], data[1])
 	} else if len(data) == 3 {
-		self.h = HASH(self.allocator, self.cipherstate.protocol, self.h, data[0], data[1], data[2])
+		HASH(h, &self.cipherstate.protocol, h, data[0], data[1], data[2])
 	}
 }
 
@@ -464,9 +460,15 @@ symmetricstate_MixHash :: proc(self: ^SymmetricState, data: ..[]u8) {
 // - If HASHLEN is 64, then truncates temp_k to 32 bytes.
 // - Calls InitializeKey(temp_k).
 symmetricstate_MixKey :: proc(self: ^SymmetricState, input_key_material: []u8) {
+	hash_len := HashLen(self.cipherstate.protocol.hash)
+
+	dst_len := hash_len * 2
+	dst: [2*MAX_HASHLEN]byte
+	defer crypto.zero_explicit(&dst, dst_len)
+
 	input_key_material := input_key_material
-	ck, temp_k, _ := HKDF(self.ck[:], input_key_material[:], self.cipherstate.protocol, self.allocator)
-	self.ck = ck
+	ck, temp_k, _ := HKDF(dst[:dst_len], self._ck[:hash_len], input_key_material, &self.cipherstate.protocol)
+	copy(self._ck[:], ck)
 	self.cipherstate = cipherstate_InitializeKey(array32_from_slice(temp_k[:]), self.cipherstate.protocol)
 }
 
@@ -477,10 +479,15 @@ symmetricstate_MixKey :: proc(self: ^SymmetricState, input_key_material: []u8) {
 // - If HASHLEN is 64, then truncates temp_k to 32 bytes.
 // - Calls InitializeKey(temp_k).
 symmetricstate_MixKeyAndHash :: proc(self: ^SymmetricState, input_key_material: []u8) {
-	input_key_material := input_key_material
-	ck, temp_h, temp_k := HKDF(self.ck[:], input_key_material[:], self.cipherstate.protocol, self.allocator)
-	self.ck = ck
-	symmetricstate_MixHash(self, temp_h[:])
+	hash_len := HashLen(self.cipherstate.protocol.hash)
+
+	dst_len := hash_len * 3
+	dst: [3*MAX_HASHLEN]byte
+	defer crypto.zero_explicit(&dst, dst_len)
+
+	ck, temp_h, temp_k := HKDF(dst[:dst_len], self._ck[:hash_len], input_key_material, &self.cipherstate.protocol)
+	copy(self._ck[:], ck)
+	symmetricstate_MixHash(self, temp_h)
 	self.cipherstate = cipherstate_InitializeKey(array32_from_slice(temp_k[:]), self.cipherstate.protocol)
 }
 
@@ -488,10 +495,8 @@ symmetricstate_MixKeyAndHash :: proc(self: ^SymmetricState, input_key_material: 
 // i.e. after the Split() function has been called.
 // This function is used for channel binding, as described in Section 11.2
 symmetricstate_GetHandshakeHash :: proc(self: SymmetricState) -> []u8 {
-	if true {
-		panic("GetHandshakeHash is not a supported function in this implementation")
-	}
-	return self.h
+	panic("GetHandshakeHash is not a supported function in this implementation")
+	// return self.h
 }
 
 // Sets ciphertext = EncryptWithAd(h, plaintext), calls MixHash(ciphertext),
@@ -500,7 +505,7 @@ symmetricstate_GetHandshakeHash :: proc(self: SymmetricState) -> []u8 {
 // Note that if k is empty, the EncryptWithAd() call will set ciphertext
 // equal to plaintext.
 symmetricstate_EncryptAndHash :: proc(self:  ^SymmetricState, plaintext: []u8) -> (CryptoBuffer, NoiseStatus) {
-	ciphertext, status := cipherstate_EncryptWithAd(&self.cipherstate, self.h[:HashLen(self.cipherstate.protocol.hash)], plaintext)
+	ciphertext, status := cipherstate_EncryptWithAd(&self.cipherstate, self._h[:HashLen(self.cipherstate.protocol.hash)], plaintext)
 	symmetricstate_MixHash(self, ciphertext.main_body, ciphertext.tag[:])
 	return ciphertext, status
 }
@@ -516,7 +521,7 @@ symmetricstate_DecryptAndHash :: proc(self:  ^SymmetricState, ciphertext: Crypto
 		main_body = slice.clone(ciphertext.main_body, self.allocator),
 		tag = ciphertext.tag,
 	}
-	result, decrypt_error := cipherstate_DecryptWithAd(&self.cipherstate, self.h[:HashLen(self.cipherstate.protocol.hash)], ciphertext)
+	result, decrypt_error := cipherstate_DecryptWithAd(&self.cipherstate, self._h[:HashLen(self.cipherstate.protocol.hash)], ciphertext)
 	if decrypt_error != .Ok {
 		return nil, decrypt_error
 	}
@@ -532,7 +537,13 @@ symmetricstate_DecryptAndHash :: proc(self:  ^SymmetricState, ciphertext: Crypto
 //  - Calls c1.InitializeKey(temp_k1) and c2.InitializeKey(temp_k2).
 //  - Returns the pair (c1, c2).
 symmetricstate_Split :: proc(self: ^SymmetricState) -> (CipherState, CipherState) {
-	temp_k1, temp_k2, _ := HKDF(self.ck[:], nil, self.cipherstate.protocol, self.allocator)
+	hash_len := HashLen(self.cipherstate.protocol.hash)
+
+	dst_len := hash_len * 2
+	dst: [2*MAX_HASHLEN]byte
+	defer crypto.zero_explicit(&dst, dst_len)
+
+	temp_k1, temp_k2, _ := HKDF(dst[:dst_len], self._ck[:hash_len], nil, &self.cipherstate.protocol)
 	c1 := cipherstate_InitializeKey(array32_from_slice(temp_k1[:]), self.cipherstate.protocol)
 	c2 := cipherstate_InitializeKey(array32_from_slice(temp_k2[:]), self.cipherstate.protocol)
 	return c1, c2
@@ -639,6 +650,7 @@ handshakestate_initialize :: proc(
 		}
 	}
 
+	// XXX/yawning: HUH?
 	if s == nil {
 		s = GENERATE_KEYPAIR(symmetricstate.cipherstate.protocol)
 	}
@@ -965,20 +977,4 @@ cryptobuffer_from_slice :: proc(slice: []u8) -> CryptoBuffer {
 				slice[length +12],slice[length +13],slice[length +14],slice[length +15],
 			},
 	}
-}
-
-array_xor :: proc(a: []u8, b: []u8, allocator: mem.Allocator) -> []u8 {
-	assert(len(a) == len(b))
-	c := make([]u8, len(a), allocator)
-	for i in 0..<len(a) {
-		c[i] = a[i] ~ b[i]
-	}
-	return c
-}
-
-concat_bytes :: proc(b1: []u8, b2: []u8, allocator := context.allocator) -> []u8 {
-	output := make_slice([]u8, len(b1) + len(b2), allocator)
-	copy(output[0:len(b1)], b1)
-	copy(output[len(b1):], b2)
-	return output
 }

@@ -295,6 +295,7 @@ benchmark_dh :: proc() {
 	fmt.println("Time dh: ", time.stopwatch_duration(sw) / 1000)
 }
 
+/*
 benchmark_hash :: proc() {
 	allo : mem.Dynamic_Arena
 	mem.dynamic_arena_init(&allo)
@@ -316,6 +317,7 @@ benchmark_hash :: proc() {
 	time.stopwatch_stop(&sw)
 	fmt.println("Time hash: ", time.stopwatch_duration(sw) / 1000)
 }
+*/
 
 benchmark_cipher :: proc() {
 	allo : mem.Dynamic_Arena
@@ -356,6 +358,6 @@ main :: proc() {
 	test_1000_random_protocols()
 
 	benchmark_dh()
-	benchmark_hash()
+	// benchmark_hash()
 	benchmark_cipher()
 }

@@ -62,8 +62,8 @@ HandshakeState :: struct {
 
 SymmetricState :: struct {
 	cipherstate: CipherState,
-	ck: []u8,
-	h: []u8,
+	_ck: [MAX_HASHLEN]u8,
+	_h: [MAX_HASHLEN]u8,
 	allocator: mem.Allocator,
 	backing: ^mem.Dynamic_Arena,
 }
