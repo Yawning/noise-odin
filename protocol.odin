@@ -4,6 +4,7 @@ import "core:crypto"
 import "core:crypto/aead"
 import "core:crypto/ecdh"
 import "core:crypto/hash"
+import "core:encoding/endian"
 import "core:mem"
 import "core:slice"
 import "core:strings"
@@ -243,7 +244,8 @@ ENCRYPT :: proc(k: [32]u8, n: u64, ad: []u8, plaintext: []u8, protocol: Protocol
 	ciphertext : CryptoBuffer
 	ctx : aead.Context
 
-	iv := nonce_from_u64(n)
+	iv: [12]u8
+	endian.unchecked_put_u64be(iv[4:], n)
 
 	aead.init(&ctx, protocol.cipher, k[:])
 	aead.seal_ctx(&ctx, plaintext, tag[:], iv[:], ad, plaintext)
@@ -263,8 +265,10 @@ DECRYPT :: proc(k: [32]u8, n: u64, ad: []u8, ciphertext: CryptoBuffer, protocol:
 	k := k
 
 	ctx : aead.Context
-	iv := nonce_from_u64(n)
 	tag := ciphertext.tag
+
+	iv: [12]u8
+	endian.unchecked_put_u64be(iv[4:], n)
 
 	aead.init(&ctx, protocol.cipher, k[:])
 	if aead.open_ctx(&ctx, ciphertext.main_body, iv[:], ad, ciphertext.main_body, tag[:]) {
@@ -961,23 +965,6 @@ cryptobuffer_from_slice :: proc(slice: []u8) -> CryptoBuffer {
 				slice[length +12],slice[length +13],slice[length +14],slice[length +15],
 			},
 	}
-}
-
-to_be_bytes :: proc(n: u64) -> [8]u8 {
-	n0 := u8(n >> 0)
-	n1 := u8(n >> 8)
-	n2 := u8(n >> 16)
-	n3 := u8(n >> 24)
-	n4 := u8(n >> 32)
-	n5 := u8(n >> 40)
-	n6 := u8(n >> 48)
-	n7 := u8(n >> 56)
-	return {n7, n6, n5, n4, n3, n2, n1, n0}
-}
-
-nonce_from_u64 :: proc(n: u64) -> [12]u8 {
-	n := to_be_bytes(n)
-	return {0,0,0,0,n[0], n[1], n[2], n[3], n[4], n[5], n[6], n[7]}
 }
 
 array_xor :: proc(a: []u8, b: []u8, allocator: mem.Allocator) -> []u8 {
