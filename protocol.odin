@@ -1,31 +1,21 @@
+#+private
 package noise
 
+import "base:runtime"
 import "core:crypto"
 import "core:crypto/aead"
 import "core:crypto/ecdh"
 import "core:crypto/hash"
 import "core:crypto/hkdf"
 import "core:encoding/endian"
-import "core:mem"
 import "core:slice"
 import "core:strings"
 
-import "core:fmt"
+AEAD_KEY_SIZE :: 32
 
-MAX_DHLEN :: 56
-MAX_HASHLEN :: 64
-
-DhLen :: proc(dh: ecdh.Curve) -> int {
-	return ecdh.PUBLIC_KEY_SIZES[dh]
-}
-
-HashLen :: proc(h: hash.Algorithm) -> int {
-	return hash.DIGEST_SIZES[h]
-}
-
-BlockLen :: proc(h: hash.Algorithm) -> int {
-	return hash.BLOCK_SIZES[h]
-}
+MIN_DH_SIZE :: 32
+MAX_DH_SIZE :: 56
+MAX_HASH_SIZE :: 64
 
 Protocol :: struct {
 	handshake_pattern: Handshake_Pattern,
@@ -34,158 +24,42 @@ Protocol :: struct {
 	hash: hash.Algorithm,
 }
 
-// XXX: We are not *THAT* opinionated, yeet.
-DEFAULT_PROTOCOL_NAME :: "Noise_XX_25519_AESGCM_SHA256"
+Symmetric_State :: struct {
+	protocol: Protocol,
+	cipher_state: Cipher_State,
 
-DEFAULT_PROTOCOL :: Protocol {
-	handshake_pattern = .XX,
-	dh = .X25519,
-	cipher = .AES_GCM_256,
-	hash = .SHA256,
+	_ck: [MAX_HASH_SIZE]byte,
+	_h: [MAX_HASH_SIZE]byte,
 }
 
-ERROR_PROTOCOL :: Protocol {
-	handshake_pattern = .Invalid,
-	dh = .Invalid,
-	cipher = .Invalid,
-	hash = .Invalid,
+Cipher_State :: struct {
+	ctx: aead.Context,
+	n: u64,
+	n_exhausted: bool,
+	is_invalid: bool,
 }
 
-parse_protocol_string :: proc (protocol_string: string) -> (Protocol, NoiseStatus) {
-	if len(protocol_string) > 255 {
-		return ERROR_PROTOCOL, .Protocol_could_not_be_parsed
-	}
-
-	protocol : Protocol
-	underline : [4]u8
-
-	count := 0
-	for i in 0..<len(protocol_string) {
-		if protocol_string[i] == '_' {
-			underline[count] = u8(i)
-			count += 1
-		}
-	}
-
-	if count != 4 {
-		return ERROR_PROTOCOL, .Protocol_could_not_be_parsed
-	}
-
-	switch protocol_string[underline[0]+1 : underline[1]] {
-	case "N" : protocol.handshake_pattern = .N
-	case "K" : protocol.handshake_pattern = .K
-	case "X" : protocol.handshake_pattern = .X
-	case "XX": protocol.handshake_pattern = .XX
-	case "NK": protocol.handshake_pattern = .NK
-	case "NN": protocol.handshake_pattern = .NN
-	case "KN": protocol.handshake_pattern = .KN
-	case "KK": protocol.handshake_pattern = .KK
-	case "NX": protocol.handshake_pattern = .NX
-	case "KX": protocol.handshake_pattern = .KX
-	case "XN": protocol.handshake_pattern = .XN
-	case "IN": protocol.handshake_pattern = .IN
-	case "XK": protocol.handshake_pattern = .XK
-	case "IK": protocol.handshake_pattern = .IK
-	case "IX": protocol.handshake_pattern = .IX
-	case "NNpsk0": protocol.handshake_pattern = .NNpsk0
-	case "NNpsk2": protocol.handshake_pattern = .NNpsk2
-	case "NKpsk0": protocol.handshake_pattern = .NKpsk0
-	case "NKpsk2": protocol.handshake_pattern = .NKpsk2
-	case "NXpsk2": protocol.handshake_pattern = .NXpsk2
-	case "XNpsk3": protocol.handshake_pattern = .XNpsk3
-	case "XKpsk3": protocol.handshake_pattern = .XKpsk3
-	case "XXpsk3": protocol.handshake_pattern = .XXpsk3
-	case "KNpsk0": protocol.handshake_pattern = .KNpsk0
-	case "KNpsk2": protocol.handshake_pattern = .KNpsk2
-	case "KKpsk0": protocol.handshake_pattern = .KKpsk0
-	case "KKpsk2": protocol.handshake_pattern = .KKpsk2
-	case "KXpsk2": protocol.handshake_pattern = .KXpsk2
-	case "INpsk1": protocol.handshake_pattern = .INpsk1
-	case "INpsk2": protocol.handshake_pattern = .INpsk2
-	case "IKpsk1": protocol.handshake_pattern = .IKpsk1
-	case "IKpsk2": protocol.handshake_pattern = .IKpsk2
-	case "IXpsk2": protocol.handshake_pattern = .IXpsk2
-	case: return ERROR_PROTOCOL, .Protocol_could_not_be_parsed
-	}
-
-	switch protocol_string[underline[1]+1 : underline[2]] {
-	case "25519": protocol.dh = .X25519
-	case "448": protocol.dh = .X448
-	case: return ERROR_PROTOCOL, .Protocol_could_not_be_parsed
-	}
-
-	switch protocol_string[underline[2]+1 : underline[3]] {
-	case "AESGCM": protocol.cipher = .AES_GCM_256
-	case "ChaChaPoly": protocol.cipher = .CHACHA20POLY1305
-	case: return ERROR_PROTOCOL, .Protocol_could_not_be_parsed
-	}
-
-	switch protocol_string[underline[3]+1 : ] {
-	case "SHA512": protocol.hash = .SHA512
-	case "SHA256": protocol.hash = .SHA256
-	case "Blake2s": protocol.hash = .BLAKE2S
-	case "Blake2b": protocol.hash = .BLAKE2B
-	case: return ERROR_PROTOCOL, .Protocol_could_not_be_parsed
-	}
-
-	return protocol, .Ok
+@(require_results)
+dh_len :: proc(protocol: ^Protocol) -> int {
+	return ecdh.PUBLIC_KEY_SIZES[protocol.dh]
 }
 
-// This function will panic if passed and invalid protocol.
-protocol_text_from_struct :: proc(protocol: Protocol, allocator := context.allocator) -> string {
-	s := strings.builder_make()
-
-	hp := protocol.handshake_pattern
-	dh: string
-	#partial switch protocol.dh {
-	case .X25519: dh = "25519"
-	case .X448: dh = "448"
-	case: panic("unsupported DH curve passed to printer function")
-	}
-
-	c: string
-	#partial switch protocol.cipher {
-	case .AES_GCM_256: c = "AESGCM"
-	case .CHACHA20POLY1305: c = "ChaChaPoly"
-	case: panic("unsupported cipher passed to printer function")
-	}
-
-	h: string
-	#partial switch protocol.hash {
-	case .SHA256: h = "SHA256"
-	case .SHA512: h = "SHA512"
-	case .BLAKE2S: h = "Blake2s"
-	case .BLAKE2B: h = "Blake2b"
-	case: panic("unsupported hash passed to printer function")
-	}
-
-	fmt.sbprintf(&s, "Noise_%v_%v_%v_%v", hp, dh, c, h)
-
-	return strings.to_string(s)
+@(require_results)
+hash_len :: proc(protocol: ^Protocol) -> int {
+	return hash.DIGEST_SIZES[protocol.hash]
 }
 
 // Generates a new Diffie-Hellman key pair. A DH key pair consists of
 // public_key and private_key elements.  public_key represents an encoding
 // of a DH public key into a byte sequence of length DHLEN.  The public_key
 // encoding details are specific to each set of DH functions.
-GENERATE_KEYPAIR :: proc(protocol: Protocol) -> KeyPair {
-	return keypair_random(protocol)
-}
-
-keypair_random :: proc(protocol: Protocol) -> KeyPair {
-	curve := protocol.dh
+GENERATE_KEYPAIR :: proc(protocol: ^Protocol, private_key: ^ecdh.Private_Key) {
 	#partial switch protocol.dh {
 	case .X25519, .X448:
-	case: panic("unsupported DH curve in protocol")
+	case: panic("crypto/noise: unsupported DH curve in protocol")
 	}
-	private : ecdh.Private_Key
-	public : ecdh.Public_Key
-	ecdh.private_key_generate(&private, curve)
-	ecdh.public_key_set_priv(&public, &private)
-	return KeyPair{
-		public = public,
-		private = private,
-	}
+
+	ecdh.private_key_generate(private_key, protocol.dh)
 }
 
 // Performs a Diffie-Hellman calculation between the private key in key_pair
@@ -201,21 +75,12 @@ keypair_random :: proc(protocol: Protocol) -> KeyPair {
 // an error to the caller.
 //
 // The DH function may define more specific rules for handling invalid values.
-//
-// DEV NOTE: This function does not return any error but simply panics
-// on invalid input. Invalid input signals an implementation error which
-// should be caught in testing
-DH :: proc(key_pair: ^KeyPair, their_public_key: ^ecdh.Public_Key, allocator: mem.Allocator) -> []u8 {
-	dst := make([]u8, DhLen(key_pair.private._curve))
-	success := ecdh.ecdh(&key_pair.private, their_public_key, dst[:])
-
-	if !success {
-		s: strings.Builder
-		fmt.sbprintfln(&s, "ecdh failed. Inputs were:\nprivate_key: %v\npublic_key: %v", key_pair.private, their_public_key)
-		panic(strings.to_string(s))
+@(require_results)
+DH :: proc(our_private_key: ^ecdh.Private_Key, their_public_key: ^ecdh.Public_Key, dst: []byte) -> Status {
+	if ok := ecdh.ecdh(our_private_key, their_public_key, dst); !ok {
+		return .DH_Failure
 	}
-
-	return dst
+	return .Ok
 }
 
 // Encrypts plaintext using the cipher key k of 32 bytes and an 8-byte
@@ -226,77 +91,49 @@ DH :: proc(key_pair: ^KeyPair, their_public_key: ^ecdh.Public_Key, allocator: me
 // plus 16 bytes for authentication data.  The entire ciphertext must be
 // indistinguishable from random if the key is secret (note that this is
 // an additional requirement that isn't necessarily met by all AEAD schemes).
-//
-// DEV NOTE: This function overwrites the plaintext with the cipertext.
-// If you want to preserve the plaintext it must be copied to a separate
-// buffer before calling this function
-ENCRYPT :: proc(k: [32]u8, n: u64, ad: []u8, plaintext: []u8, protocol: Protocol) -> (CryptoBuffer, NoiseStatus) {
-	k := k
-	plaintext := plaintext
+ENCRYPT :: proc(ctx: ^aead.Context, n: u64, ad, plaintext, dst: []byte) {
+	pt_len := len(plaintext)
+	ensure(len(dst) == pt_len + TAG_SIZE, "crypto/noise: invalid AEAD encrypt destination")
 
-	tag : [16]u8
-	ciphertext : CryptoBuffer
-	ctx : aead.Context
-
-	iv: [12]u8
+	iv: [12]byte
 	endian.unchecked_put_u64be(iv[4:], n)
 
-	aead.init(&ctx, protocol.cipher, k[:])
-	aead.seal_ctx(&ctx, plaintext, tag[:], iv[:], ad, plaintext)
-
-	ciphertext.tag = tag
-	ciphertext.main_body = plaintext
-
-	return ciphertext, .Ok
+	ciphertext, tag := dst[:pt_len], dst[pt_len:]
+	aead.seal_ctx(ctx, ciphertext, tag, iv[:], ad, plaintext)
 }
 
 // Decrypts ciphertext using a cipher key k of 32 bytes, an 8-byte unsigned
 // integer nonce n, and associated data ad. Returns the plaintext, unless
 // authentication fails, in which case an error is signaled to the caller.
-//
-// DEV NOTE: This function overwrites the main_body of the ciphertext with the plaintext.
-DECRYPT :: proc(k: [32]u8, n: u64, ad: []u8, ciphertext: CryptoBuffer, protocol: Protocol) -> ([]u8, NoiseStatus) {
-	k := k
+@(require_results)
+DECRYPT :: proc(ctx: ^aead.Context, n: u64, ad, ciphertext, dst: []byte) -> Status {
+	if len(ciphertext) < TAG_SIZE {
+		return .Decryption_Failure
+	}
 
-	ctx : aead.Context
-	tag := ciphertext.tag
-
-	iv: [12]u8
+	iv: [12]byte
 	endian.unchecked_put_u64be(iv[4:], n)
 
-	aead.init(&ctx, protocol.cipher, k[:])
-	if aead.open_ctx(&ctx, ciphertext.main_body, iv[:], ad, ciphertext.main_body, tag[:]) {
-		return ciphertext.main_body, .Ok
-	} else {
-		return nil, .Decryption_failed_to_authenticate
+	ct_len := len(ciphertext) - TAG_SIZE
+	ct, tag := ciphertext[:ct_len], ciphertext[ct_len:]
+	if ok := aead.open_ctx(ctx, dst, iv[:], ad, ct, tag); !ok {
+		return .Decryption_Failure
 	}
+
+	return .Ok
 }
 
 // Hashes some arbitrary-length data with a collision-resistant cryptographic
 // hash function and returns an output of HASHLEN bytes.
-HASH :: proc(dst: []byte, protocol: ^Protocol, data: ..[]u8) {
-	ctx : hash.Context
+HASH :: proc(dst: []byte, protocol: ^Protocol, data: ..[]byte) {
+	ctx: hash.Context
 	hash.init(&ctx, protocol.hash)
+
 	for datum in data {
 		hash.update(&ctx, datum)
 	}
-	hash.final(&ctx, dst)
-}
 
-// Returns a new 32-byte cipher key as a pseudorandom function of k. If
-// this function is not specifically defined for some set of cipher functions,
-// then it defaults to returning the first 32 bytes from
-// `ENCRYPT(k, maxnonce, zerolen, zeros)`, where maxnonce equals (2^64)-1,
-// zerolen is a zero-length byte sequence, and zeros is a sequence of
-// 32 bytes filled with zeros.
-REKEY :: proc(k: [32]u8, protocol: Protocol) -> [32]u8 {
-	zeros : [32]u8
-	//		 1  2  3  4  5  6  7  8
-	n :u64 = 0xFF_FF_FF_FF_FF_FF_FF_FF
-	ENCRYPT(k, n, nil, zeros[:], protocol)
-	new_key : [32]u8
-	copy(new_key[:], zeros[:])
-	return new_key
+	hash.final(&ctx, dst)
 }
 
 // Takes a chaining_key byte sequence of length HASHLEN, and an
@@ -313,12 +150,13 @@ REKEY :: proc(k: [32]u8, protocol: Protocol) -> [32]u8 {
 // Note that temp_key, output1, output2, and output3 are all HASHLEN
 // bytes in length. Also note that the HKDF() function is simply HKDF
 // from [4] with the chaining_key as HKDF salt, and zero-length HKDF info.
-HKDF :: proc(dst, chaining_key, input_key_material: []byte, protocol: ^Protocol) -> ([]u8, []u8, []u8) {
-	assert(len(input_key_material) == 0 || len(input_key_material) == 32 || len(input_key_material) == DhLen(protocol.dh))
+@(require_results)
+HKDF :: proc(dst, chaining_key, input_key_material: []byte, protocol: ^Protocol) -> ([]byte, []byte, []byte) {
+	assert(len(input_key_material) == 0 || len(input_key_material) == 32 || len(input_key_material) == dh_len(protocol))
 
 	hkdf.extract_and_expand(protocol.hash, chaining_key, input_key_material, nil, dst)
 
-	h_len := HashLen(protocol.hash)
+	h_len := hash_len(protocol)
 	assert(len(dst) == h_len * 2 || len(dst) == h_len * 3)
 
 	r1, r2 := dst[:h_len], dst[h_len:h_len*2]
@@ -328,69 +166,126 @@ HKDF :: proc(dst, chaining_key, input_key_material: []byte, protocol: ^Protocol)
 	return r1, r2, dst[h_len*2:]
 }
 
-get_curve :: proc(handshake_state: ^HandshakeState) -> ecdh.Curve {
-	return handshake_state.symmetricstate.cipherstate.protocol.dh
-}
-
 // Sets k = key. Sets n = 0.
-cipherstate_InitializeKey :: proc(key: [32]u8, protocol: Protocol) -> CipherState {
-	return CipherState {
-		protocol = protocol,
-		k = key,
-		n = 0,
+cipherstate_InitializeKey :: proc(self: ^Cipher_State, key: []byte, protocol: ^Protocol) {
+	k_len := len(key)
+	switch {
+	case k_len == 0:
+		// k = empty
+		aead.reset(&self.ctx)
+		self.n = 0
+	case k_len < AEAD_KEY_SIZE:
+		panic("crypto/noise: invalid AEAD key size")
+	case:
+		aead.init(&self.ctx, protocol.cipher, key[:AEAD_KEY_SIZE])
+		self.n = 0
 	}
 }
 
 // Returns true if k is non-empty, false otherwise.
-cipherstate_HasKey :: proc(self: ^CipherState) -> bool {
-	zeroslice : [32]u8
-	if slice.equal(self.k[:], zeroslice[:]) {
-		return false
-	} else {
-		return true
-	}
+@(require_results)
+cipherstate_HasKey :: proc(self: ^Cipher_State) -> bool {
+	return aead.algorithm(&self.ctx) != .Invalid
 }
 
 // If k is non-empty returns ENCRYPT(k, n++, ad, plaintext). Otherwise
 // returns plaintext.
-cipherstate_EncryptWithAd :: proc(self: ^CipherState, ad: []u8, plaintext: []u8) -> (CryptoBuffer, NoiseStatus) {
-	if len(plaintext) > MAX_PACKET_SIZE - 16 {
-		return {}, .tried_to_encrypt_message_bigger_than_MAX_PACKET_SIZE
+@(require_results)
+cipherstate_EncryptWithAd :: proc(self: ^Cipher_State, ad, plaintext, dst: []byte) -> ([]byte, Status) {
+	if self.is_invalid {
+		return nil, .Invalid_Cipher_State
+	}
+	if self.n_exhausted {
+		return nil, .IV_Exhausted
+	}
+
+	pt_len := len(plaintext)
+	if pt_len > MAX_PACKET_SIZE - 16 {
+		return nil, .Max_Packet_Size
 	}
 
 	if cipherstate_HasKey(self) {
-		temp, encrypt_error := ENCRYPT(self.k, self.n, ad, plaintext, self.protocol)
-		if encrypt_error != .Ok {
-			return temp, encrypt_error
+		if len(dst) != pt_len + TAG_SIZE {
+			return nil, .Invalid_Destination_Buffer
 		}
+		ENCRYPT(&self.ctx, self.n, ad, plaintext, dst)
 		self.n += 1
-		return temp, .Ok
+		if self.n == 0 {
+			self.n_exhausted = true
+		}
 	} else {
-		return CryptoBuffer {main_body = plaintext}, .Ok
+		if len(dst) != pt_len {
+			return nil, .Invalid_Destination_Buffer
+		}
+		if raw_data(dst) != raw_data(plaintext) {
+			copy(dst, plaintext)
+		}
 	}
+
+	return dst, .Ok
 }
 
 // If k is non-empty returns DECRYPT(k, n++, ad, ciphertext). Otherwise
 // returns ciphertext.  If an authentication failure occurs in DECRYPT()
 // then n is not incremented and an error is signaled to the caller.
-cipherstate_DecryptWithAd :: proc(self: ^CipherState, ad: []u8, ciphertext: CryptoBuffer) -> ([]u8, NoiseStatus) {
+@(require_results)
+cipherstate_DecryptWithAd :: proc(self: ^Cipher_State, ad, ciphertext, dst: []byte) -> ([]byte, Status) {
+	if self.is_invalid {
+		return nil, .Invalid_Cipher_State
+	}
+	if self.n_exhausted {
+		return nil, .IV_Exhausted
+	}
+
 	if cipherstate_HasKey(self) {
-		plaintext, decrypt_error := DECRYPT(self.k, self.n, ad, ciphertext, self.protocol)
-		if decrypt_error != .Ok {
-			return plaintext, decrypt_error
+		if status := DECRYPT(&self.ctx, self.n, ad, ciphertext, dst); status != .Ok {
+			return nil, status
 		}
 		self.n += 1
-		return plaintext, .Ok
+		if self.n == 0 {
+			self.n_exhausted = true
+		}
 	} else {
-		return ciphertext.main_body, .Ok
+		if len(dst) != len(ciphertext) {
+			return nil, .Invalid_Destination_Buffer
+		}
+		if raw_data(dst) != raw_data(ciphertext) {
+			copy(dst, ciphertext)
+		}
 	}
+
+	return dst, .Ok
 }
 
 // Sets k = REKEY(k).
-cipherstate_Rekey :: proc(self: ^CipherState) {
+cipherstate_Rekey :: proc(self: ^Cipher_State) {
 	if cipherstate_HasKey(self) {
-		self.k = REKEY(self.k, self.protocol)
+		algorithm := aead.algorithm(&self.ctx)
+
+		// The "sensible" way to implement this is to inlike REKEY(k),
+		// so we do.
+		//
+		// Returns a new 32-byte cipher key as a pseudorandom function
+		// of k. If this function is not specifically defined for some
+		// set of cipher functions, then it defaults to returning the
+		// first 32 bytes from `ENCRYPT(k, maxnonce, zerolen, zeros)`,
+		// where maxnonce equals (2^64)-1, zerolen is a zero-length
+		// byte sequence, and zeros is a sequence of 32 bytes filled
+		// with zeros.
+
+		zeroes: [AEAD_KEY_SIZE + TAG_SIZE]byte
+		defer crypto.zero_explicit(&zeroes, size_of(zeroes))
+
+		//		 1  2  3  4  5  6  7  8
+		n: u64 = 0xFF_FF_FF_FF_FF_FF_FF_FF
+		ENCRYPT(&self.ctx, n, nil, zeroes[:AEAD_KEY_SIZE], zeroes[:])
+		aead.init(&self.ctx, algorithm, zeroes[:AEAD_KEY_SIZE])
 	}
+}
+
+cipherstate_reset :: proc(self: ^Cipher_State) {
+	aead.reset(&self.ctx)
+	crypto.zero_explicit(self, size_of(Cipher_State))
 }
 
 // Takes an arbitrary-length protocol_name byte sequence (see Section 8).
@@ -401,57 +296,37 @@ cipherstate_Rekey :: proc(self: ^CipherState) {
 //  - Otherwise sets h = HASH(protocol_name).
 //  - Sets ck = h.
 //  - Calls InitializeKey(empty).
-symmetricstate_initialize_symmetric :: proc(protocol_name: string) -> (SymmetricState, NoiseStatus) {
-	zeroslice : [32]u8
-
-	backing := new(mem.Dynamic_Arena)
-	mem.dynamic_arena_init(backing)
-	allocator := mem.dynamic_arena_allocator(backing)
-
-	protocol, parse_error := parse_protocol_string(protocol_name)
-	if parse_error == .Protocol_could_not_be_parsed {
-		return SymmetricState{}, .Protocol_could_not_be_parsed
+@(require_results)
+symmetricstate_Initialize :: proc(ss: ^Symmetric_State, protocol_name: string) -> Status {
+	if status := protocol_from_string(&ss.protocol, protocol_name); status != .Ok {
+		return status
 	}
 
-	hash_len := HashLen(protocol.hash)
-	if len(protocol_name) < HashLen(protocol.hash) {
-		ss := SymmetricState{
-			cipherstate = cipherstate_InitializeKey(zeroslice, protocol),
-			allocator = allocator,
-			backing = backing,
-		}
+	cipherstate_InitializeKey(&ss.cipher_state, nil, &ss.protocol)
 
-		h := ss._h[:hash_len]
-		copy(h, protocol_name[:])
-		HASH(h, &protocol, h)
-		copy(ss._ck[:hash_len], h)
-
-		return ss, .Ok
+	h_len := hash_len(&ss.protocol)
+	h := ss._h[:h_len]
+	if len(protocol_name) < h_len {
+		copy(h, protocol_name)
+		HASH(h, &ss.protocol, h)
 	} else {
-		ss := SymmetricState{
-			cipherstate = cipherstate_InitializeKey(zeroslice, protocol),
-			allocator = allocator,
-			backing = backing,
-		}
-
-		h := ss._h[:hash_len]
-		HASH(h, &protocol, transmute([]byte)protocol_name)
-		copy(ss._ck[:hash_len], h)
-		return ss, .Ok
+		HASH(h, &ss.protocol, transmute([]byte)protocol_name)
 	}
+
+	copy(ss._ck[:h_len], h)
+
+	return .Ok
 }
 
 // Sets h = HASH(h || data).
-symmetricstate_MixHash :: proc(self: ^SymmetricState, data: ..[]byte) {
-	hash_len := HashLen(self.cipherstate.protocol.hash)
-
-	h := self._h[:hash_len]
+symmetricstate_MixHash :: proc(self: ^Symmetric_State, data: ..[]byte) {
+	h := self._h[:hash_len(&self.protocol)]
 	if len(data) == 1 {
-		HASH(h, &self.cipherstate.protocol, h, data[0])
+		HASH(h, &self.protocol, h, data[0])
 	} else if len(data) == 2 {
-		HASH(h, &self.cipherstate.protocol, h, data[0], data[1])
+		HASH(h, &self.protocol, h, data[0], data[1])
 	} else if len(data) == 3 {
-		HASH(h, &self.cipherstate.protocol, h, data[0], data[1], data[2])
+		HASH(h, &self.protocol, h, data[0], data[1], data[2])
 	}
 }
 
@@ -459,17 +334,16 @@ symmetricstate_MixHash :: proc(self: ^SymmetricState, data: ..[]byte) {
 // - Sets ck, temp_k = HKDF(ck, input_key_material, 2).
 // - If HASHLEN is 64, then truncates temp_k to 32 bytes.
 // - Calls InitializeKey(temp_k).
-symmetricstate_MixKey :: proc(self: ^SymmetricState, input_key_material: []u8) {
-	hash_len := HashLen(self.cipherstate.protocol.hash)
+symmetricstate_MixKey :: proc(self: ^Symmetric_State, input_key_material: []byte) {
+	h_len := hash_len(&self.protocol)
 
-	dst_len := hash_len * 2
-	dst: [2*MAX_HASHLEN]byte
+	dst_len := h_len * 2
+	dst: [2*MAX_HASH_SIZE]byte = ---
 	defer crypto.zero_explicit(&dst, dst_len)
 
-	input_key_material := input_key_material
-	ck, temp_k, _ := HKDF(dst[:dst_len], self._ck[:hash_len], input_key_material, &self.cipherstate.protocol)
+	ck, temp_k, _ := HKDF(dst[:dst_len], self._ck[:h_len], input_key_material, &self.protocol)
 	copy(self._ck[:], ck)
-	self.cipherstate = cipherstate_InitializeKey(array32_from_slice(temp_k[:]), self.cipherstate.protocol)
+	cipherstate_InitializeKey(&self.cipher_state, temp_k, &self.protocol)
 }
 
 // This function is used for handling pre-shared symmetric keys, as described
@@ -478,25 +352,26 @@ symmetricstate_MixKey :: proc(self: ^SymmetricState, input_key_material: []u8) {
 // - Calls MixHash(temp_h).
 // - If HASHLEN is 64, then truncates temp_k to 32 bytes.
 // - Calls InitializeKey(temp_k).
-symmetricstate_MixKeyAndHash :: proc(self: ^SymmetricState, input_key_material: []u8) {
-	hash_len := HashLen(self.cipherstate.protocol.hash)
+symmetricstate_MixKeyAndHash :: proc(self: ^Symmetric_State, input_key_material: []byte) {
+	h_len := hash_len(&self.protocol)
 
-	dst_len := hash_len * 3
-	dst: [3*MAX_HASHLEN]byte
+	dst_len := h_len * 3
+	dst: [3*MAX_HASH_SIZE]byte = ---
 	defer crypto.zero_explicit(&dst, dst_len)
 
-	ck, temp_h, temp_k := HKDF(dst[:dst_len], self._ck[:hash_len], input_key_material, &self.cipherstate.protocol)
+	ck, temp_h, temp_k := HKDF(dst[:dst_len], self._ck[:h_len], input_key_material, &self.protocol)
 	copy(self._ck[:], ck)
 	symmetricstate_MixHash(self, temp_h)
-	self.cipherstate = cipherstate_InitializeKey(array32_from_slice(temp_k[:]), self.cipherstate.protocol)
+	cipherstate_InitializeKey(&self.cipher_state, temp_k, &self.protocol)
 }
 
 // Returns h. This function should only be called at the end of a handshake,
 // i.e. after the Split() function has been called.
+//
 // This function is used for channel binding, as described in Section 11.2
-symmetricstate_GetHandshakeHash :: proc(self: SymmetricState) -> []u8 {
-	panic("GetHandshakeHash is not a supported function in this implementation")
-	// return self.h
+@(require_results)
+symmetricstate_GetHandshakeHash :: proc(self: ^Symmetric_State) -> []byte {
+	return self._h[:hash_len(&self.protocol)]
 }
 
 // Sets ciphertext = EncryptWithAd(h, plaintext), calls MixHash(ciphertext),
@@ -504,9 +379,13 @@ symmetricstate_GetHandshakeHash :: proc(self: SymmetricState) -> []u8 {
 //
 // Note that if k is empty, the EncryptWithAd() call will set ciphertext
 // equal to plaintext.
-symmetricstate_EncryptAndHash :: proc(self:  ^SymmetricState, plaintext: []u8) -> (CryptoBuffer, NoiseStatus) {
-	ciphertext, status := cipherstate_EncryptWithAd(&self.cipherstate, self._h[:HashLen(self.cipherstate.protocol.hash)], plaintext)
-	symmetricstate_MixHash(self, ciphertext.main_body, ciphertext.tag[:])
+@(require_results)
+symmetricstate_EncryptAndHash :: proc(self: ^Symmetric_State, plaintext, dst: []byte) -> ([]byte, Status) {
+	ciphertext, status := cipherstate_EncryptWithAd(&self.cipher_state, self._h[:hash_len(&self.protocol)], plaintext, dst)
+	if status != .Ok {
+		return nil, status
+	}
+	symmetricstate_MixHash(self, ciphertext)
 	return ciphertext, status
 }
 
@@ -515,18 +394,18 @@ symmetricstate_EncryptAndHash :: proc(self:  ^SymmetricState, plaintext: []u8) -
 //
 // Note that if k is empty, the DecryptWithAd() call will set plaintext
 // equal to ciphertext.
-symmetricstate_DecryptAndHash :: proc(self:  ^SymmetricState, ciphertext: CryptoBuffer) -> ([]u8, NoiseStatus) {
-	ciphertext := ciphertext
-	hash_text := CryptoBuffer {
-		main_body = slice.clone(ciphertext.main_body, self.allocator),
-		tag = ciphertext.tag,
-	}
-	result, decrypt_error := cipherstate_DecryptWithAd(&self.cipherstate, self._h[:HashLen(self.cipherstate.protocol.hash)], ciphertext)
-	if decrypt_error != .Ok {
-		return nil, decrypt_error
-	}
-	symmetricstate_MixHash(self, hash_text.main_body, hash_text.tag[:])
-	return result, .Ok
+@(require_results)
+symmetricstate_DecryptAndHash :: proc(self: ^Symmetric_State, ciphertext, dst: []byte) -> ([]byte, Status) {
+	h_len := hash_len(&self.protocol)
+
+	h: [MAX_HASH_SIZE]byte = ---
+	copy(h[:], self._h[:h_len])
+	defer crypto.zero_explicit(&h, size_of(h))
+
+	// We reverse the order to save having to copy the ciphertext, in
+	// the case that ciphertext and dst alias.
+	symmetricstate_MixHash(self, ciphertext)
+	return cipherstate_DecryptWithAd(&self.cipher_state, h[:h_len], ciphertext, dst)
 }
 
 // Returns a pair of CipherState objects for encrypting transport messages.
@@ -536,17 +415,22 @@ symmetricstate_DecryptAndHash :: proc(self:  ^SymmetricState, ciphertext: Crypto
 //  - Creates two new CipherState objects c1 and c2.
 //  - Calls c1.InitializeKey(temp_k1) and c2.InitializeKey(temp_k2).
 //  - Returns the pair (c1, c2).
-symmetricstate_Split :: proc(self: ^SymmetricState) -> (CipherState, CipherState) {
-	hash_len := HashLen(self.cipherstate.protocol.hash)
+symmetricstate_Split :: proc(self: ^Symmetric_State, cipher_states: ^Cipher_States) {
+	h_len := hash_len(&self.protocol)
 
-	dst_len := hash_len * 2
-	dst: [2*MAX_HASHLEN]byte
+	dst_len := h_len * 2
+	dst: [2*MAX_HASH_SIZE]byte = ---
 	defer crypto.zero_explicit(&dst, dst_len)
 
-	temp_k1, temp_k2, _ := HKDF(dst[:dst_len], self._ck[:hash_len], nil, &self.cipherstate.protocol)
-	c1 := cipherstate_InitializeKey(array32_from_slice(temp_k1[:]), self.cipherstate.protocol)
-	c2 := cipherstate_InitializeKey(array32_from_slice(temp_k2[:]), self.cipherstate.protocol)
-	return c1, c2
+	temp_k1, temp_k2, _ := HKDF(dst[:dst_len], self._ck[:h_len], nil, &self.protocol)
+	cipherstate_InitializeKey(&cipher_states.c1_i_to_r, temp_k1, &self.protocol)
+	cipherstate_InitializeKey(&cipher_states.c2_r_to_i, temp_k2, &self.protocol)
+}
+
+symmetricstate_reset :: proc(self: ^Symmetric_State) {
+	cipherstate_reset(&self.cipher_state)
+
+	crypto.zero_explicit(self, size_of(Symmetric_State))
 }
 
 // Takes a valid handshake_pattern (see Section 7) and an initiator boolean
@@ -577,127 +461,152 @@ symmetricstate_Split :: proc(self: ^SymmetricState) -> (CipherState, CipherState
 //  - If multiple public keys are listed in either party's pre-message,
 //	the public keys are hashed in the order that they are listed.
 //  -  Sets message_pattern to the message patterns from handshake_pattern.
-handshakestate_initialize :: proc(
+@(require_results)
+handshakestate_Initialize :: proc(
+	handshake_state: ^Handshake_State,
 	initiator: bool,
-	prologue: []u8,
-	s: Maybe(KeyPair),
-	e: Maybe(KeyPair),
-	rs: Maybe(ecdh.Public_Key),
-	re: Maybe(ecdh.Public_Key),
-	protocol_name := DEFAULT_PROTOCOL_NAME,
-	psk : [32]u8 = 0,
-) -> (HandshakeState, NoiseStatus) {
+	prologue: []byte,
+	s: ^ecdh.Private_Key,
+	e: ^ecdh.Private_Key, // Only set for testing.
+	rs: ^ecdh.Public_Key,
+	re: ^ecdh.Public_Key, // Only set for testing.
+	protocol_name: string,
+	psk: []byte = nil,
+) -> Status {
+	crypto.zero_explicit(handshake_state, size_of(Handshake_State))
 
-	s  := s
-	rs := rs
-	re := re
+	symmetric_state := &handshake_state.symmetric_state
+	status: Status
+	do_init: {
+		if status = symmetricstate_Initialize(symmetric_state, protocol_name); status != .Ok {
+			break do_init
+		}
 
-	symmetricstate, status := symmetricstate_initialize_symmetric(protocol_name)
-	if status == .Protocol_could_not_be_parsed {
-		return HandshakeState{}, status
-	}
+		curve := symmetric_state.protocol.dh
+		if s != nil && ecdh.curve(s) != curve {
+			status = .Invalid_DH_Key
+			break do_init
+		}
+		if e != nil && ecdh.curve(e) != curve {
+			status = .Invalid_DH_Key
+			break do_init
+		}
+		if rs != nil && ecdh.curve(rs) != curve {
+			status = .Invalid_DH_Key
+			break do_init
+		}
+		if re != nil && ecdh.curve(re) != curve {
+			status = .Invalid_DH_Key
+			break do_init
+		}
 
-	message_pattern := HANDSHAKE_PATTERNS[symmetricstate.cipherstate.protocol.handshake_pattern]
-
-	if message_pattern.pre_messages != nil {
+		// Check if we will require s later down the line.
+		s_pre, s_hs: bool
 		if initiator {
-			if slice.contains(message_pattern.pre_messages, Pre_Token.res_s) {
-				if rs == nil {
-					return {}, .rs_not_set_for_s_pre_message
+			s_pre, s_hs = pattern_requires_initiator_s(symmetric_state.protocol.handshake_pattern)
+		} else {
+			s_pre, s_hs = pattern_requires_responder_s(symmetric_state.protocol.handshake_pattern)
+		}
+		if (s_pre || s_hs) && s == nil {
+			status = .No_Self_Identity
+			break do_init
+		}
+
+		message_pattern := HANDSHAKE_PATTERNS[symmetric_state.protocol.handshake_pattern]
+		if message_pattern.pre_messages != nil {
+			if initiator {
+				if slice.contains(message_pattern.pre_messages, Pre_Token.res_s) {
+					if rs == nil {
+						status = .No_Peer_Identity
+						break do_init
+					}
+				}
+			} else {
+				if slice.contains(message_pattern.pre_messages, Pre_Token.ini_s) {
+					if rs == nil {
+						status = .No_Peer_Identity
+						break do_init
+					}
 				}
 			}
 		} else {
-			if slice.contains(message_pattern.pre_messages, Pre_Token.ini_s) {
-				if rs == nil {
-					return {}, .rs_not_set_for_s_pre_message
+			if rs != nil {
+				status = .Unexpected_Peer_Identity
+				break do_init
+			}
+		}
+
+		symmetricstate_MixHash(symmetric_state, prologue)
+
+		// In all supported patterns, `ini_s` will always preceedr `res_s`.
+		if message_pattern.pre_messages != nil {
+			tmp: [MAX_DH_SIZE]byte = ---
+			d_len := dh_len(&symmetric_state.protocol)
+			dst := tmp[:d_len]
+
+			if initiator {
+				if slice.contains(message_pattern.pre_messages, Pre_Token.ini_s) {
+					ecdh.public_key_bytes(&s._pub_key, dst)
+					symmetricstate_MixHash(symmetric_state, dst)
+				}
+				if slice.contains(message_pattern.pre_messages, Pre_Token.res_s) {
+					ecdh.public_key_bytes(rs, dst)
+					symmetricstate_MixHash(symmetric_state, dst)
+				}
+			} else {
+				if slice.contains(message_pattern.pre_messages, Pre_Token.ini_s) {
+					ecdh.public_key_bytes(rs, dst)
+					symmetricstate_MixHash(symmetric_state, dst)
+				}
+				if slice.contains(message_pattern.pre_messages, Pre_Token.res_s) {
+					ecdh.public_key_bytes(&s._pub_key, dst)
+					symmetricstate_MixHash(symmetric_state, dst)
 				}
 			}
 		}
-	} else {
-		rs = nil
-		re = nil
-	}
-
-	symmetricstate_MixHash(&symmetricstate, prologue)
-
-	if message_pattern.pre_messages != nil {
-		if initiator {
-			if slice.contains(message_pattern.pre_messages, Pre_Token.ini_s) {
-				dst : [MAX_DHLEN]u8
-				temp_s := s.?
-				ecdh.public_key_bytes(&temp_s.public, dst[:DhLen(symmetricstate.cipherstate.protocol.dh)])
-				symmetricstate_MixHash(&symmetricstate, dst[:DhLen(symmetricstate.cipherstate.protocol.dh)])
+		if message_pattern.is_psk {
+			if len(psk) != PSK_SIZE {
+				status = .Invalid_Pre_Shared_Key
+				break do_init
 			}
-			if slice.contains(message_pattern.pre_messages, Pre_Token.res_s) {
-				dst : [MAX_DHLEN]u8
-				temp_rs := rs.?
-				ecdh.public_key_bytes(&temp_rs, dst[:DhLen(symmetricstate.cipherstate.protocol.dh)])
-				symmetricstate_MixHash(&symmetricstate, dst[:DhLen(symmetricstate.cipherstate.protocol.dh)])
-			}
-		} else {
-			if slice.contains(message_pattern.pre_messages, Pre_Token.ini_s) {
-				dst : [MAX_DHLEN]u8
-				temp_rs := rs.?
-				ecdh.public_key_bytes(&temp_rs, dst[:DhLen(symmetricstate.cipherstate.protocol.dh)])
-				symmetricstate_MixHash(&symmetricstate, dst[:DhLen(symmetricstate.cipherstate.protocol.dh)])
-			}
-			if slice.contains(message_pattern.pre_messages, Pre_Token.res_s) {
-				dst : [MAX_DHLEN]u8
-				temp_s := s.?
-				ecdh.public_key_bytes(&temp_s.public, dst[:DhLen(symmetricstate.cipherstate.protocol.dh)])
-				symmetricstate_MixHash(&symmetricstate, dst[:DhLen(symmetricstate.cipherstate.protocol.dh)])
-			}
+		} else if len(psk) != 0 {
+			status = .Unexpected_Pre_Shared_Key
+			break do_init
 		}
 	}
-
-	// XXX/yawning: HUH?
-	if s == nil {
-		s = GENERATE_KEYPAIR(symmetricstate.cipherstate.protocol)
+	if status != .Ok {
+		symmetricstate_reset(symmetric_state)
+		return status
 	}
 
-	output := HandshakeState {
-		symmetricstate = symmetricstate,
-		s = s,
-		e = e,
-		rs = rs,
-		re = re,
-		initiator = initiator,
-		message_pattern = message_pattern,
-		current_token = 0,
-		psk = psk,
+	if s != nil {
+		handshake_state.s = s^
 	}
+	if e != nil {
+		handshake_state.e = e^
+		handshake_state.pre_set_e = true
+	}
+	if rs != nil {
+		handshake_state.rs = rs^
+	}
+	if re != nil {
+		handshake_state.re = re^
+	}
+	copy(handshake_state.psk[:], psk)
+	handshake_state.message_pattern = HANDSHAKE_PATTERNS[symmetric_state.protocol.handshake_pattern]
+	handshake_state.current_message = 0
+	handshake_state.status = .Handshake_Pending
+	handshake_state.initiator = initiator
 
-	return output, .Ok
+	return .Ok
 }
 
-print_handshakestate :: proc(hs: HandshakeState) {
-	fmt.println(hs.symmetricstate.cipherstate.protocol)
-	fmt.println("Initiator: ", hs.initiator)
-	if hs.e == nil {
-		fmt.println("hs.e = nil")
-	} else {
-		fmt.println("hs.e = SET")
-	}
-	if hs.s == nil {
-		fmt.println("hs.s = nil")
-	} else {
-		fmt.println("hs.s = SET")
-	}
-	if hs.re == nil {
-		fmt.println("hs.re = nil")
-	} else {
-		fmt.println("hs.re = SET")
-	}
-	if hs.rs == nil {
-		fmt.println("hs.rs = nil")
-	} else {
-		fmt.println("hs.rs = SET")
-	}
-}
+handshakestate_reset :: proc(self: ^Handshake_State) {
+	symmetricstate_reset(&self.symmetric_state)
+	ecdh.private_key_clear(&self.s)
+	ecdh.private_key_clear(&self.e)
 
-handshakestate_destroy :: proc(state: ^HandshakeState) {
-	free_all(state.symmetricstate.allocator)
-	mem.dynamic_arena_destroy(state.symmetricstate.backing)
+	crypto.zero_explicit(self, size_of(Handshake_State))
 }
 
 // Takes a payload byte sequence which may be zero-length, and a
@@ -715,266 +624,446 @@ handshakestate_destroy :: proc(state: ^HandshakeState) {
 //	  - For "se": Calls MixKey(DH(s, re)) if initiator, MixKey(DH(e, rs))
 //		if responder.
 //	  - For "ss": Calls MixKey(DH(s, rs)).
+//  - Appends EncryptAndHash(payload) to the buffer.
+//  – (SKIPPED) If there are no more message patterns returns two new
+//    CipherState objects by calling Split().
 //
-// Appends EncryptAndHash(payload) to the buffer.
-//
-// If there are no more message patterns returns two new CipherState objects
-// by calling Split().
-handshakestate_write_message :: proc(self: ^HandshakeState, payload: []u8, allocator := context.allocator) -> ([]u8, CipherState, CipherState, NoiseStatus) {
-	// fmt.println("WRITE MESSAGE")
-	message_buffer := make([dynamic]u8, allocator)
-	pattern := self.message_pattern.messages[self.current_token]
-	self.current_token += 1
-	for token in pattern {
-		// fmt.println("token: ", token)
-		switch token {
+// Calling Split() is left to a separate function, although it is technically
+// part of the specification.
+@(require_results)
+handshakestate_WriteMessage :: proc(self: ^Handshake_State, payload, dst: []byte, allocator := context.allocator) -> ([]byte, Status) {
+	ensure(self.status == .Handshake_Pending, "crypto/noise: invalid state for WriteMessage")
 
+	protocol := &self.symmetric_state.protocol
+	d_len := dh_len(protocol)
+
+	pattern_buf: [dynamic; MAX_STEP_MSG_SIZE]byte
+	dh_buf: [MAX_DH_SIZE]byte = ---
+	defer crypto.zero_explicit(&dh_buf, size_of(dh_buf))
+
+	pattern := self.message_pattern.messages[self.current_message]
+	for token in pattern {
+		switch token {
 		case .e:
-			self.e = GENERATE_KEYPAIR(self.symmetricstate.cipherstate.protocol)
-			e_public, allocerror := make([]u8, DhLen(get_curve(self)), self.symmetricstate.allocator)
-			if allocerror == .Out_Of_Memory {
-				fmt.eprintln("OOM")
-				return {}, {},{}, .out_of_memory
+			switch self.pre_set_e {
+			case true:
+				// Note: "which must be empty", but we allow pre-generated `e`
+				// for testing/rng-less systems.
+				self.pre_set_e = false
+			case false:
+				if ecdh.curve(&self.e) != .Invalid {
+					panic("crypto/noise: e was not empty when processing token 'e' during WriteMessage")
+				}
+				GENERATE_KEYPAIR(protocol, &self.e)
 			}
-			switch &e in self.e {
-			case KeyPair: ecdh.public_key_bytes(&e.public, e_public)
-			case nil: panic("There must be a bug in the compiler. e is generated a few lines before this check")
-			}
-			assert(len(e_public) == DhLen(get_curve(self)))
-			elems_added, append_error := append(&message_buffer, ..e_public)
-			if append_error == .Out_Of_Memory {
-				fmt.eprintln("OOM")
-				return {}, {},{}, .out_of_memory
-			}
-			symmetricstate_MixHash(&self.symmetricstate, e_public)
+			e_public := dh_buf[:d_len]
+			ecdh.public_key_bytes(&self.e._pub_key, e_public)
+			n := append(&pattern_buf, ..e_public)
+			ensure(n == d_len, "crypto/noise: truncated append `e`")
+
+			symmetricstate_MixHash(&self.symmetric_state, e_public)
 			if self.message_pattern.is_psk {
-				symmetricstate_MixKey(&self.symmetricstate, e_public)
+				symmetricstate_MixKey(&self.symmetric_state, e_public)
 			}
 
 		case .s:
-			dst := make([]u8, DhLen(get_curve(self)), self.symmetricstate.allocator)
-			ecdh.public_key_bytes(&unwrap(self.s).public, dst)
-			temp, status := symmetricstate_EncryptAndHash(&self.symmetricstate, dst)
-			if status != .Ok {
-				return {},{}, {}, status
-			}
+			s_public := dh_buf[:d_len]
+			ecdh.public_key_bytes(&self.s._pub_key, s_public)
 
-			_, append_error := append(&message_buffer, ..temp.main_body)
-			if cipherstate_HasKey(&self.symmetricstate.cipherstate) {
-				_, append_error = append(&message_buffer, ..temp.tag[:])
+			tmp: [MAX_DH_SIZE+TAG_SIZE]byte = ---
+			dh_buf := tmp[:d_len+TAG_SIZE]
+			if !cipherstate_HasKey(&self.symmetric_state.cipher_state) {
+				dh_buf = tmp[:d_len]
 			}
-			if append_error == .Out_Of_Memory {
-				fmt.eprintln("OOM")
-				return {}, {},{}, .out_of_memory
+			ct, status := symmetricstate_EncryptAndHash(&self.symmetric_state, s_public, dh_buf)
+			if status != .Ok {
+				self.status = .Handshake_Failed
+				return nil, status
 			}
+			n := append(&pattern_buf, ..ct)
+			ensure(n == len(ct), "crypto/noise: truncated append `s`")
 
 		case .ee:
-			dh := DH(&self.e.?, &self.re.?, self.symmetricstate.allocator)
-			symmetricstate_MixKey(&self.symmetricstate, dh)
+			dh := dh_buf[:d_len]
+			if status := DH(&self.e, &self.re, dh); status != .Ok {
+				self.status = .Handshake_Failed
+				return nil, status
+			}
+			symmetricstate_MixKey(&self.symmetric_state, dh)
 
 		case .es:
+			dh := dh_buf[:d_len]
 			if self.initiator {
-				dh := DH(&self.e.?, &self.rs.?, self.symmetricstate.allocator)
-				symmetricstate_MixKey(&self.symmetricstate, dh)
+				if status := DH(&self.e, &self.rs, dh); status != .Ok {
+					self.status = .Handshake_Failed
+					return nil, status
+				}
+				symmetricstate_MixKey(&self.symmetric_state, dh)
 			} else {
-				dh := DH(&self.s.?, &self.re.?, self.symmetricstate.allocator)
-				symmetricstate_MixKey(&self.symmetricstate, dh)
+				if status := DH(&self.s, &self.re, dh); status != .Ok {
+					self.status = .Handshake_Failed
+					return nil, status
+				}
+				symmetricstate_MixKey(&self.symmetric_state, dh)
 			}
 
 		case .se:
+			dh := dh_buf[:d_len]
 			if self.initiator {
-				dh := DH(&self.s.?, &self.re.?, self.symmetricstate.allocator)
-				symmetricstate_MixKey(&self.symmetricstate, dh)
+				if status := DH(&self.s, &self.re, dh); status != .Ok {
+					self.status = .Handshake_Failed
+					return nil, status
+				}
+				symmetricstate_MixKey(&self.symmetric_state, dh)
 			} else {
-				dh := DH(&self.e.?, &self.rs.?, self.symmetricstate.allocator)
-				symmetricstate_MixKey(&self.symmetricstate, dh)
+				if status := DH(&self.e, &self.rs, dh); status != .Ok {
+					self.status = .Handshake_Failed
+					return nil, status
+				}
+				symmetricstate_MixKey(&self.symmetric_state, dh)
 			}
 
 		case .ss:
-			dh := DH(&self.s.?, &self.rs.?, self.symmetricstate.allocator)
-			symmetricstate_MixKey(&self.symmetricstate, dh)
+			dh := dh_buf[:d_len]
+			if status := DH(&self.s, &self.rs, dh); status != .Ok {
+				self.status = .Handshake_Failed
+				return nil, status
+			}
+			symmetricstate_MixKey(&self.symmetric_state, dh)
 
 		case .psk:
-			symmetricstate_MixKeyAndHash(&self.symmetricstate, self.psk[:])
+			symmetricstate_MixKeyAndHash(&self.symmetric_state, self.psk[:])
+		}
+	}
+	self.current_message += 1 // Advance after the current message is successful.
+
+	pattern_len := len(pattern_buf)
+	payload_len := len(payload)
+	msg_len := pattern_len + payload_len
+	if payload_len != 0 && cipherstate_HasKey(&self.symmetric_state.cipher_state) {
+		msg_len += TAG_SIZE
+	}
+
+	msg: []byte
+	if msg_len != 0 {
+		did_alloc: bool
+		if dst != nil {
+			if len(dst) < msg_len {
+				self.status = .Handshake_Failed
+				return nil, .Out_Of_Memory
+			}
+			msg = dst[:msg_len]
+		} else {
+			err: runtime.Allocator_Error
+			msg, err = make([]byte, msg_len, allocator)
+			if err != nil {
+				self.status = .Handshake_Failed
+				return nil, .Out_Of_Memory
+			}
+			did_alloc = true
+		}
+
+		copy(msg, pattern_buf[:])
+		if payload_len != 0 {
+			ciphertext := msg[pattern_len:]
+			if _, status := symmetricstate_EncryptAndHash(&self.symmetric_state, payload, ciphertext); status != .Ok {
+				if did_alloc {
+					delete(msg)
+				}
+				self.status = .Handshake_Failed
+				return nil, status
+			}
 		}
 	}
 
-	if len(payload) != 0 {
-		encrypted_payload, status := symmetricstate_EncryptAndHash(&self.symmetricstate, payload)
-		if status != .Ok {
-			return {},{},{}, status
-		}
-		append(&message_buffer, ..encrypted_payload.main_body)
-		elems_added, append_error := append(&message_buffer, ..encrypted_payload.tag[:])
-		if append_error == .Out_Of_Memory {
-			return {}, {},{}, .out_of_memory
-		}
+	if self.current_message == len(self.message_pattern.messages) {
+		self.current_message = -1
+		self.status = .Handshake_Complete
 	}
 
-	if self.current_token == len(self.message_pattern.messages) {
-		c1, c2 := symmetricstate_Split(&self.symmetricstate)
-		self.current_token = 0
-		free_all(self.symmetricstate.allocator)
-		return message_buffer[:], c1, c2, .Handshake_Complete
-	} else {
-		return message_buffer[:], {}, {}, .Pending_Handshake
-	}
+	return msg, self.status
 }
 
 // Takes a byte sequence containing a Noise handshake message, and a
 // payload_buffer to write the message's plaintext payload into.
 // Performs the following steps, aborting if any DecryptAndHash()
 // call returns an error:
-// -  Fetches and deletes the next message pattern from message_pattern,
-//	then sequentially processes each token from the message pattern:
-//	- For "e": Sets re (which must be empty) to the next DHLEN bytes
-//	  from the message. Calls MixHash(re.public_key).
-//	- For "s": Sets temp to the next DHLEN + 16 bytes of the message
-//	  if HasKey() == True, or to the next DHLEN bytes otherwise.
-//	  Sets rs (which must be empty) to DecryptAndHash(temp).
-//	- For "ee": Calls MixKey(DH(e, re)).
-//	- For "es": Calls MixKey(DH(e, rs)) if initiator, MixKey(DH(s, re))
-//	  if responder.
-//	- For "se": Calls MixKey(DH(s, re)) if initiator, MixKey(DH(e, rs))
-//	  if responder.
-//	-For "ss": Calls MixKey(DH(s, rs)).
-// - Calls DecryptAndHash() on the remaining bytes of the message and stores
-//   the output into payload_buffer.
-// - If there are no more message patterns returns two new CipherState objects
-//   by calling Split().
-handshakestate_read_message :: proc(self: ^HandshakeState, message: []u8)  -> ([]u8, CipherState, CipherState, NoiseStatus) {
-	// fmt.println("READ MESSAGE")
-	if len(message) < 32 {
-		return {},{},{}, .invalid_message_passed_to_read_message
+//  -  Fetches and deletes the next message pattern from message_pattern,
+//     then sequentially processes each token from the message pattern:
+//    - For "e": Sets re (which must be empty) to the next DHLEN bytes
+//      from the message. Calls MixHash(re.public_key).
+//    - For "s": Sets temp to the next DHLEN + 16 bytes of the message
+//      if HasKey() == True, or to the next DHLEN bytes otherwise.
+//      Sets rs (which must be empty) to DecryptAndHash(temp).
+//    - For "ee": Calls MixKey(DH(e, re)).
+//    - For "es": Calls MixKey(DH(e, rs)) if initiator, MixKey(DH(s, re))
+//      if responder.
+//    - For "se": Calls MixKey(DH(s, re)) if initiator, MixKey(DH(e, rs))
+//      if responder.
+//    -For "ss": Calls MixKey(DH(s, rs)).
+//  - Calls DecryptAndHash() on the remaining bytes of the message and stores
+//    the output into payload_buffer.
+//  – (SKIPPED) If there are no more message patterns returns two new
+//    CipherState objects by calling Split().
+//
+// Calling Split() is left to a separate function, although it is technically
+// part of the specification.
+@(require_results)
+handshakestate_ReadMessage :: proc(self: ^Handshake_State, message, dst: []byte, allocator := context.allocator)  -> ([]byte, Status) {
+	ensure(self.status == .Handshake_Pending, "crypto/noise: invalid state for ReadMessage")
+
+	if len(message) < MIN_DH_SIZE {
+		return nil, .Invalid_Handshake_Message
 	}
-	pattern := self.message_pattern.messages[self.current_token]
-	self.current_token += 1
-	message_cursor := 0
+
+	protocol := &self.symmetric_state.protocol
+	d_len := dh_len(&self.symmetric_state.protocol)
+
+	dh_buf: [MAX_DH_SIZE]byte = ---
+	defer crypto.zero_explicit(&dh_buf, size_of(dh_buf))
+
+	msg := message
+
+	pattern := self.message_pattern.messages[self.current_message]
 	for token in pattern {
-		// fmt.println("token: ", token)
 		switch token {
 		case .e:
-			re := make([]u8, DhLen(get_curve(self)), self.symmetricstate.allocator)
-			copy(re[:], message[message_cursor : message_cursor + DhLen(get_curve(self))])
-			message_cursor += DhLen(get_curve(self))
-			switch &self_re in self.re {
-			case nil:
-				temp2 : ecdh.Public_Key
-				ecdh.public_key_set_bytes(&temp2, get_curve(self), re)
-				self.re = temp2
-				symmetricstate_MixHash(&self.symmetricstate, re)
-			case ecdh.Public_Key:
-				fmt.eprintln("Implementation error: re was not empty when processing token 'e' during read_message.\nre = %v", self.re)
-				panic("Implementation error: re was not empty when processing token 'e' during read_message")
+			if len(msg) < d_len {
+				return nil, .Invalid_Handshake_Message
 			}
+			re := msg[:d_len]
+
+			if ecdh.curve(&self.re) != .Invalid {
+				panic("crypto/noise: re was not empty when processing token 'e' during ReadMessage")
+			}
+
+			ecdh.public_key_set_bytes(&self.re, protocol.dh, re)
+			symmetricstate_MixHash(&self.symmetric_state, re)
 			if self.message_pattern.is_psk {
-				symmetricstate_MixKey(&self.symmetricstate, re)
+				symmetricstate_MixKey(&self.symmetric_state, re)
 			}
+			msg = msg[d_len:]
 
 		case .s:
-			rs_size : int
-			if cipherstate_HasKey(&self.symmetricstate.cipherstate) {
-				rs_size = DhLen(get_curve(self)) + 16
-			} else {
-				rs_size = DhLen(get_curve(self))
+			rs_len := d_len
+			if cipherstate_HasKey(&self.symmetric_state.cipher_state) {
+				rs_len += TAG_SIZE
 			}
-			rs := make([]u8, rs_size, self.symmetricstate.allocator)
-			copy(rs[:], message[message_cursor : message_cursor + rs_size])
-			message_cursor += rs_size
-			temp : []u8
-			if cipherstate_HasKey(&self.symmetricstate.cipherstate) {
-				rs_buffer := cryptobuffer_from_slice(rs)
-				temp, _ = symmetricstate_DecryptAndHash(&self.symmetricstate, rs_buffer)
-			} else {
-				rs_buffer := CryptoBuffer{main_body = rs[:], tag = 0}
-				temp, _ = symmetricstate_DecryptAndHash(&self.symmetricstate, rs_buffer)
+			if len(msg) < rs_len {
+				self.status = .Handshake_Failed
+				return nil, .Invalid_Handshake_Message
 			}
-			switch &self_rs in self.rs {
-			case nil:
-				temp2 : ecdh.Public_Key
-				ecdh.public_key_set_bytes(&temp2, get_curve(self), temp)
-				self.rs = temp2
-			case ecdh.Public_Key:
-				fmt.eprintln("Implementation error: rs was not empty when processing token 's'.\nre = %v", self.rs)
-				panic("Implementation error: rs was not empty when processing token 's'")
+
+			rs := dh_buf[:d_len]
+			if _, status := symmetricstate_DecryptAndHash(&self.symmetric_state, msg[:rs_len], rs); status != .Ok {
+				self.status = .Handshake_Failed
+				return nil, status
 			}
+
+			if ecdh.curve(&self.rs) != .Invalid {
+				panic("crypto/noise: rs was not empty when processing token 's' during ReadMessage")
+			}
+
+			ecdh.public_key_set_bytes(&self.rs, protocol.dh, rs)
+			msg = msg[rs_len:]
 
 		case .ee:
-			dh := DH(&self.e.?, &self.re.?, self.symmetricstate.allocator)
-			symmetricstate_MixKey(&self.symmetricstate, dh)
+			dh := dh_buf[:d_len]
+			if status := DH(&self.e, &self.re, dh); status != .Ok {
+				self.status = .Handshake_Failed
+				return nil, status
+			}
+			symmetricstate_MixKey(&self.symmetric_state, dh)
 
 		case .es:
+			dh := dh_buf[:d_len]
 			if self.initiator {
-				dh := DH(&self.e.?, &self.rs.?,self.symmetricstate.allocator)
-				symmetricstate_MixKey(&self.symmetricstate, dh)
+				if status := DH(&self.e, &self.rs, dh); status != .Ok {
+					self.status = .Handshake_Failed
+					return nil, status
+				}
+				symmetricstate_MixKey(&self.symmetric_state, dh)
 			} else {
-				dh := DH(&self.s.?, &self.re.?, self.symmetricstate.allocator)
-				symmetricstate_MixKey(&self.symmetricstate, dh)
+				if status := DH(&self.s, &self.re, dh); status != .Ok {
+					self.status = .Handshake_Failed
+					return nil, status
+				}
+				symmetricstate_MixKey(&self.symmetric_state, dh)
 			}
 
 		case .se:
+			dh := dh_buf[:d_len]
 			if self.initiator {
-				dh := DH(&self.s.?, &self.re.?, self.symmetricstate.allocator)
-				symmetricstate_MixKey(&self.symmetricstate, dh)
+				if status := DH(&self.s, &self.re, dh); status != .Ok {
+					self.status = .Handshake_Failed
+					return nil, status
+				}
+				symmetricstate_MixKey(&self.symmetric_state, dh)
 			} else {
-				dh := DH(&self.e.?, &self.rs.?, self.symmetricstate.allocator)
-				symmetricstate_MixKey(&self.symmetricstate, dh)
+				if status := DH(&self.e, &self.rs, dh); status != .Ok {
+					self.status = .Handshake_Failed
+					return nil, status
+				}
+				symmetricstate_MixKey(&self.symmetric_state, dh)
 			}
 
 		case .ss:
-			dh := DH(&self.s.?, &self.rs.?, self.symmetricstate.allocator)
-			symmetricstate_MixKey(&self.symmetricstate, dh)
+			dh := dh_buf[:d_len]
+			if status := DH(&self.s, &self.rs, dh); status != .Ok {
+				self.status = .Handshake_Failed
+				return nil, status
+			}
+			symmetricstate_MixKey(&self.symmetric_state, dh)
 
 		case .psk:
-			symmetricstate_MixKeyAndHash(&self.symmetricstate, self.psk[:])
+			symmetricstate_MixKeyAndHash(&self.symmetric_state, self.psk[:])
+		}
+	}
+	self.current_message += 1 // Advance after the current message is successful.
+
+	payload: []byte
+	if len(msg) > 0 {
+		payload_len := len(msg)
+		if cipherstate_HasKey(&self.symmetric_state.cipher_state) {
+			if payload_len < TAG_SIZE {
+				self.status = .Handshake_Failed
+				return nil, self.status
+			}
+			payload_len -= TAG_SIZE
+		}
+
+		did_alloc: bool
+		if dst != nil {
+			if len(dst) < payload_len {
+				self.status = .Handshake_Failed
+				return nil, .Out_Of_Memory
+			}
+			payload = dst[:payload_len]
+		} else {
+			err: runtime.Allocator_Error
+			payload, err = make([]byte, payload_len, allocator)
+			if err != nil {
+				self.status = .Handshake_Failed
+				return nil, .Out_Of_Memory
+			}
+			did_alloc = true
+		}
+
+		if _, status := symmetricstate_DecryptAndHash(&self.symmetric_state, msg, payload); status != .Ok {
+			if did_alloc {
+				delete(payload)
+			}
+			self.status = .Handshake_Failed
+			return nil, self.status
 		}
 	}
 
-	payload_buffer : []u8
-
-	if message_cursor < len(message) {
-		payload_buffer = make([]u8, len(message) - message_cursor, self.symmetricstate.allocator)
-		copy(payload_buffer, message[message_cursor:])
-		rest_buffer := cryptobuffer_from_slice(payload_buffer)
-		payload_buffer, payload_status := symmetricstate_DecryptAndHash(&self.symmetricstate, rest_buffer)
-		if payload_status != .Ok {
-			return {},{},{}, payload_status
-		}
+	if self.current_message == len(self.message_pattern.messages) {
+		self.current_message = -1
+		self.status = .Handshake_Complete
 	}
 
-	if self.current_token == len(self.message_pattern.messages) {
-		c1, c2 := symmetricstate_Split(&self.symmetricstate)
-		self.current_token = 0
-		free_all(self.symmetricstate.allocator)
-		return payload_buffer, c1, c2, .Handshake_Complete
-	} else {
-		return payload_buffer, {}, {}, .Pending_Handshake
-	}
+	return payload, self.status
 }
 
-array32_from_slice :: proc(slice: []u8) -> [32]u8 {
-	buf : [32]u8
-	copy(buf[:], slice[0 : min(len(slice), 32)])
-	return buf
-}
+@(require_results)
+protocol_from_string :: proc(self: ^Protocol, protocol_name: string) -> Status {
+	str := protocol_name
+	self^ = Protocol{}
 
-unwrap :: proc(m: Maybe($T)) -> ^T {
-	switch &x in m {
-	case T: return &x
-	case nil: panic("Unwrap called on nil value")
+	if len(str) > 255 {
+		return .Invalid_Protocol_String
 	}
-	return nil
-}
 
-cryptobuffer_from_slice :: proc(slice: []u8) -> CryptoBuffer {
-	assert(len(slice) > 16)
-	length := len(slice)-16
-	return CryptoBuffer{
-		main_body = slice[:len(slice)-16],
-		tag = {slice[length +0], slice[length +1], slice[length +2], slice[length +3],
-				slice[length +4], slice[length +5], slice[length +6], slice[length +7],
-				slice[length +8], slice[length +9], slice[length +10],slice[length +11],
-				slice[length +12],slice[length +13],slice[length +14],slice[length +15],
-			},
+	s, ok := strings.split_by_byte_iterator(&str, '_')
+	if !ok || s != "Noise" {
+		return .Invalid_Protocol_String
 	}
+
+	if s, ok = strings.split_by_byte_iterator(&str, '_'); !ok {
+		return .Invalid_Protocol_String
+	}
+	pattern: Handshake_Pattern
+	switch s {
+	case "N" : pattern = .N
+	case "K" : pattern = .K
+	case "X" : pattern = .X
+	case "XX": pattern = .XX
+	case "NK": pattern = .NK
+	case "NN": pattern = .NN
+	case "KN": pattern = .KN
+	case "KK": pattern = .KK
+	case "NX": pattern = .NX
+	case "KX": pattern = .KX
+	case "XN": pattern = .XN
+	case "IN": pattern = .IN
+	case "XK": pattern = .XK
+	case "IK": pattern = .IK
+	case "IX": pattern = .IX
+	case "Npsk0": pattern = .Npsk0
+	case "Kpsk0": pattern = .Kpsk0
+	case "Xpsk1": pattern = .Xpsk1
+	case "NNpsk0": pattern = .NNpsk0
+	case "NNpsk2": pattern = .NNpsk2
+	case "NKpsk0": pattern = .NKpsk0
+	case "NKpsk2": pattern = .NKpsk2
+	case "NXpsk2": pattern = .NXpsk2
+	case "XNpsk3": pattern = .XNpsk3
+	case "XKpsk3": pattern = .XKpsk3
+	case "XXpsk3": pattern = .XXpsk3
+	case "KNpsk0": pattern = .KNpsk0
+	case "KNpsk2": pattern = .KNpsk2
+	case "KKpsk0": pattern = .KKpsk0
+	case "KKpsk2": pattern = .KKpsk2
+	case "KXpsk2": pattern = .KXpsk2
+	case "INpsk1": pattern = .INpsk1
+	case "INpsk2": pattern = .INpsk2
+	case "IKpsk1": pattern = .IKpsk1
+	case "IKpsk2": pattern = .IKpsk2
+	case "IXpsk2": pattern = .IXpsk2
+	case: return .Invalid_Protocol_String
+	}
+
+	if s, ok = strings.split_by_byte_iterator(&str, '_'); !ok {
+		return .Invalid_Protocol_String
+	}
+	dh: ecdh.Curve
+	switch s {
+	case "25519": dh = .X25519
+	case "448": dh = .X448
+	case: return .Invalid_Protocol_String
+	}
+
+	if s, ok = strings.split_by_byte_iterator(&str, '_'); !ok {
+		return .Invalid_Protocol_String
+	}
+	cipher: aead.Algorithm
+	switch s {
+	case "AESGCM": cipher = .AES_GCM_256
+	case "ChaChaPoly": cipher = .CHACHA20POLY1305
+	case: return .Invalid_Protocol_String
+	}
+
+	if s, ok = strings.split_by_byte_iterator(&str, '_'); !ok {
+		return .Invalid_Protocol_String
+	}
+	hash: hash.Algorithm
+	switch s {
+	case "SHA512": hash = .SHA512
+	case "SHA256": hash = .SHA256
+	case "Blake2s": hash = .BLAKE2S
+	case "Blake2b": hash = .BLAKE2B
+	case: return .Invalid_Protocol_String
+	}
+
+	if len(str) != 0 {
+		return .Invalid_Protocol_String
+	}
+
+	self.handshake_pattern = pattern
+	self.dh = dh
+	self.cipher = cipher
+	self.hash = hash
+
+	return .Ok
 }

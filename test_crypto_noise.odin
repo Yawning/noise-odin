@@ -1,3 +1,4 @@
+#+build ignore
 package noise
 
 import "core:crypto"
@@ -9,16 +10,17 @@ import "core:math/rand"
 import "core:mem"
 import "core:strings"
 import "core:slice"
+import "core:testing"
 import "core:time"
 
-test_1000_random_protocols :: proc() {
-	test_log := strings.builder_make()
+@(test)
+test_noise_1000_random_protocols :: proc(t: ^testing.T) {
+	// test_log := strings.builder_make()
 
-	any_test_failed := false
-	stopwatch : time.Stopwatch
-	time.stopwatch_start(&stopwatch)
+	// any_test_failed := false
+	// stopwatch : time.Stopwatch
+	// time.stopwatch_start(&stopwatch)
 	for i in 0..<1000 {
-
 		protocol := random_protocol()
 		protocol_name := protocol_text_from_struct(protocol)
 		// protocol_name := "Noise_INpsk2_448_AESGCM_SHA256"
@@ -121,7 +123,7 @@ test_1000_random_protocols :: proc() {
 	fmt.println("SUCCESS!!")
 }
 
-test_one_protocol :: proc(protocol_name: string) -> (CipherStates, CipherStates) {
+test_noise_one_protocol :: proc(protocol_name: string) -> (CipherStates, CipherStates) {
 	test_log := strings.builder_make()
 	defer strings.builder_destroy(&test_log)
 	any_test_failed := false
@@ -238,6 +240,7 @@ test_1000_messages :: proc(ini_cstates: ^CipherStates, res_cstates: ^CipherState
 	}
 }
 
+@(private = "file")
 random_protocol :: proc() -> Protocol {
 	cipher  := random_cipher()
 	dh      := random_dh()
@@ -251,6 +254,7 @@ random_protocol :: proc() -> Protocol {
 	}
 }
 
+@(private = "file")
 random_cipher :: proc() -> aead.Algorithm {
 	if rand.int_max(2) == 0 {
 		return .AES_GCM_256
@@ -258,6 +262,7 @@ random_cipher :: proc() -> aead.Algorithm {
 	return .CHACHA20POLY1305
 }
 
+@(private = "file")
 random_dh :: proc() -> ecdh.Curve {
 	if rand.int_max(2) == 0 {
 		return .X25519
@@ -265,99 +270,12 @@ random_dh :: proc() -> ecdh.Curve {
 	return .X448
 }
 
+@(private = "file")
 random_hash :: proc() -> hash.Algorithm {
 	switch rand.int_max(4) {
 	case 0: return .SHA256
 	case 1: return .SHA512
 	case 2: return .BLAKE2S
 	case 3: return .BLAKE2B
-	case: return .Invalid
 	}
-}
-
-benchmark_dh :: proc() {
-	allo : mem.Dynamic_Arena
-	mem.dynamic_arena_init(&allo)
-	allocator := mem.dynamic_arena_allocator(&allo)
-
-	protocol := DEFAULT_PROTOCOL
-
-	p1 := GENERATE_KEYPAIR(protocol)
-	p2 := GENERATE_KEYPAIR(protocol)
-
-	sw : time.Stopwatch
-	time.stopwatch_start(&sw)
-	outputs : [1000][]u8
-	for i in 0..<1000 {
-		outputs[i] = DH(&p1, &p2.public, allocator)
-	}
-	time.stopwatch_stop(&sw)
-	fmt.println("Time dh: ", time.stopwatch_duration(sw) / 1000)
-}
-
-/*
-benchmark_hash :: proc() {
-	allo : mem.Dynamic_Arena
-	mem.dynamic_arena_init(&allo)
-	allocator := mem.dynamic_arena_allocator(&allo)
-
-	protocol := DEFAULT_PROTOCOL
-
-	h1 : [128]u8
-	h2 : [128]u8
-	crypto.rand_bytes(h1[:])
-	crypto.rand_bytes(h2[:])
-
-	sw : time.Stopwatch
-	time.stopwatch_start(&sw)
-	outputs : [1000][]u8
-	for i in 0..<1000 {
-		outputs[i] = HASH(allocator, protocol, h1[:], h2[:])
-	}
-	time.stopwatch_stop(&sw)
-	fmt.println("Time hash: ", time.stopwatch_duration(sw) / 1000)
-}
-*/
-
-benchmark_cipher :: proc() {
-	allo : mem.Dynamic_Arena
-	mem.dynamic_arena_init(&allo)
-	allocator := mem.dynamic_arena_allocator(&allo)
-
-	protocol := DEFAULT_PROTOCOL
-
-	k : [32]u8
-	h2 : [128]u8
-	crypto.rand_bytes(k[:])
-	crypto.rand_bytes(h2[:])
-
-	sw : time.Stopwatch
-	time.stopwatch_start(&sw)
-	plaintexts : [1000][128]u8
-	for &t in plaintexts {
-		crypto.rand_bytes(t[:])
-	}
-
-	outputs : [1000]CryptoBuffer
-	for i in 0..<1000 {
-		outputs[i], _ = ENCRYPT(k, u64(i), nil, plaintexts[i][:], protocol)
-	}
-	time.stopwatch_stop(&sw)
-	fmt.println("Time cipher: ", time.stopwatch_duration(sw) / 1000)
-}
-
-main :: proc() {
-
-	protocol_name := "Noise_NKpsk2_448_AESGCM_Blake2b"
-	protocol, status := parse_protocol_string(protocol_name)
-	fmt.println(protocol_name)
-	ini_cstates, res_cstates := test_one_protocol(protocol_name)
-
-	test_1000_messages(&ini_cstates, &res_cstates)
-
-	test_1000_random_protocols()
-
-	benchmark_dh()
-	// benchmark_hash()
-	benchmark_cipher()
 }
