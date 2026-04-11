@@ -1,281 +1,305 @@
-#+build ignore
 package noise
 
+import "core:bytes"
 import "core:crypto"
 import "core:crypto/aead"
 import "core:crypto/ecdh"
 import "core:crypto/hash"
 import "core:fmt"
+import "core:log"
 import "core:math/rand"
-import "core:mem"
-import "core:strings"
-import "core:slice"
 import "core:testing"
-import "core:time"
+
+@(private = "file")
+DH_CURVES :: []ecdh.Curve {
+	.X25519,
+	.X448,
+}
+@(private = "file")
+CIPHERS :: []aead.Algorithm{
+	.AES_GCM_256,
+	.CHACHA20POLY1305,
+}
+@(private = "file")
+HASHES :: []hash.Algorithm{
+	.SHA256,
+	.SHA512,
+	.BLAKE2S,
+	.BLAKE2B,
+}
 
 @(test)
-test_noise_1000_random_protocols :: proc(t: ^testing.T) {
-	// test_log := strings.builder_make()
-
-	// any_test_failed := false
-	// stopwatch : time.Stopwatch
-	// time.stopwatch_start(&stopwatch)
-	for i in 0..<1000 {
-		protocol := random_protocol()
-		protocol_name := protocol_text_from_struct(protocol)
-		// protocol_name := "Noise_INpsk2_448_AESGCM_SHA256"
-		// protocol, parse_error := parse_protocol_string(protocol_name)
-		// fmt.println(protocol_name)
-		fmt.sbprintfln(&test_log, protocol_name)
-		initiator_s := GENERATE_KEYPAIR(protocol)
-		responder_s := GENERATE_KEYPAIR(protocol)
-		ini_rs : Maybe(ecdh.Public_Key) = nil
-		res_rs : Maybe(ecdh.Public_Key) = nil
-		pattern := HANDSHAKE_PATTERNS[protocol.handshake_pattern]
-		fmt.sbprintfln(&test_log, "%v", pattern)
-		if slice.contains(pattern.pre_messages, Pre_Token.res_s) {
-			fmt.sbprintfln(&test_log, "here")
-			ini_rs = responder_s.public
-		}
-		if slice.contains(pattern.pre_messages, Pre_Token.ini_s){
-			res_rs = initiator_s.public
-		}
-
-		psk : [32]u8
-		if pattern.is_psk {
-			crypto.rand_bytes(psk[:])
-		}
-
-		initiator_handshakestate, ini_ini_status := handshakestate_initialize(
-			true,
-			nil,
-			initiator_s,
-			nil,
-			ini_rs,
-			nil,
-			protocol_name = protocol_name,
-			psk = psk,
-		)
-		responder_handshakestate, res_ini_status := handshakestate_initialize(
-			false,
-			nil,
-			responder_s,
-			nil,
-			res_rs,
-			nil,
-			protocol_name = protocol_name,
-			psk = psk,
-		)
-		if ini_ini_status != .Ok { any_test_failed = true}
-		if res_ini_status != .Ok { any_test_failed = true}
-
-		ini_status, res_status : NoiseStatus
-		ini_cstates, res_cstates : CipherStates
-		ini_message, res_message : []u8
-		res_complete := false
-
-		for {
-			if ini_status == .Handshake_Complete && res_status == .Handshake_Complete {
-				break
-			}
-			ini_cstates, res_message, ini_status = initiator_step(&initiator_handshakestate, ini_message, nil)
-			if ini_status == .Handshake_Complete && res_status == .Handshake_Complete {
-				break
-			}
-			res_cstates, ini_message, res_status = responder_step(&responder_handshakestate, res_message, nil)
-		}
-
-		if ini_cstates.c1_i_to_r != res_cstates.c1_i_to_r {any_test_failed = true}
-		if ini_cstates.c2_r_to_i != res_cstates.c2_r_to_i {any_test_failed = true}
-
-		og_test_data := make([]u8, rand.int_range(128, MAX_PACKET_SIZE-16))
-		defer delete(og_test_data)
-		crypto.rand_bytes(og_test_data[:])
-		backup_og := slice.clone(og_test_data)
-		defer delete(backup_og)
-
-		prepared_test_data, status := prepare_message(&ini_cstates, og_test_data[:])
-		decrypted_test_data, decrypt_status := open_message(&res_cstates, prepared_test_data)
-
-		if !slice.equal(backup_og[:], decrypted_test_data) {any_test_failed = true}
-
-		test_1000_messages(&ini_cstates, &res_cstates)
-
-		handshakestate_destroy(&initiator_handshakestate)
-		handshakestate_destroy(&responder_handshakestate)
-		if i%100 == 0 {
-			fmt.println(i)
-		}
-	}
-	time.stopwatch_stop(&stopwatch)
-
-	if any_test_failed {
-		fmt.println(strings.to_string(test_log))
-		fmt.println("SOME PROTOCOL FAILED!!!")
-	} else {
-		fmt.println("SUCCESS!!")
-		fmt.println("Elapsed time: ", stopwatch._accumulation)
-		fmt.println("Time per handshake and message: ", stopwatch._accumulation / 1000)
+test_supported_protocols :: proc(t: ^testing.T) {
+	if !crypto.HAS_RAND_BYTES {
+		log.info("rand_bytes not supported - skipping")
+		return
 	}
 
-	strings.builder_destroy(&test_log)
-
-	fmt.println("SUCCESS!!")
+	protocol: Test_Protocol
+	for pattern in Handshake_Pattern {
+		if pattern == .Invalid {
+			continue
+		}
+		protocol.handshake_pattern = pattern
+		for dh in DH_CURVES {
+			protocol.dh = dh
+			for cipher in CIPHERS {
+				protocol.cipher = cipher
+				for hash in HASHES {
+					protocol.hash = hash
+					if !testing.expectf(
+						t,
+						test_noise_one_protocol(t, &protocol, context.temp_allocator),
+						"Failed protocol: %v", protocol,
+					) {
+						testing.fail(t)
+						break
+					}
+				}
+			}
+		}
+	}
 }
 
-test_noise_one_protocol :: proc(protocol_name: string) -> (CipherStates, CipherStates) {
-	test_log := strings.builder_make()
-	defer strings.builder_destroy(&test_log)
-	any_test_failed := false
+@(private = "file")
+test_noise_one_protocol :: proc(t: ^testing.T, protocol: ^Test_Protocol, allocator := context.allocator) -> bool {
+	protocol_name := test_protocol_string(protocol, allocator)
+	defer delete(protocol_name, allocator)
 
-	sw : time.Stopwatch
-	time.stopwatch_start(&sw)
-	protocol, parse_error := parse_protocol_string(protocol_name)
+	log.debugf("crypto/noise: %s", protocol_name)
 
-	initiator_s := GENERATE_KEYPAIR(protocol)
-	responder_s := GENERATE_KEYPAIR(protocol)
-	ini_rs : Maybe(ecdh.Public_Key) = nil
-	res_rs : Maybe(ecdh.Public_Key) = nil
-	pattern := HANDSHAKE_PATTERNS[protocol.handshake_pattern]
-	time.stopwatch_stop(&sw)
-	fmt.println("time 1: ", time.stopwatch_duration(sw))
+	is_one_way := pattern_is_one_way(protocol.handshake_pattern)
 
-	time.stopwatch_reset(&sw)
+	initiator_s, responder_s: ecdh.Private_Key
+	ini_s, res_s: ^ecdh.Private_Key
+	ini_s_pub, res_s_pub: ^ecdh.Public_Key
 
-	time.stopwatch_start(&sw)
-	if slice.contains(pattern.pre_messages, Pre_Token.res_s) {
-		ini_rs = responder_s.public
+	pre, hs := pattern_requires_initiator_s(protocol.handshake_pattern)
+	if pre || hs {
+		if !testing.expect(t, ecdh.private_key_generate(&initiator_s, protocol.dh), "failed to generate initiator s") {
+			return false
+		}
+		ini_s = &initiator_s
+		if pre {
+			ini_s_pub = &initiator_s._pub_key
+		}
 	}
-	if slice.contains(pattern.pre_messages, Pre_Token.ini_s){
-		res_rs = initiator_s.public
+	pre, hs = pattern_requires_responder_s(protocol.handshake_pattern)
+	if pre || hs {
+		if !testing.expect(t, ecdh.private_key_generate(&responder_s, protocol.dh), "failed to generate responder s") {
+			return false
+		}
+		res_s = &responder_s
+		if pre {
+			res_s_pub = &responder_s._pub_key
+		}
 	}
 
-	psk : [32]u8
-	if pattern.is_psk {
-		crypto.rand_bytes(psk[:])
+	psk_buf: [32]byte = ---
+	psk: []byte
+	if pattern_is_psk(protocol.handshake_pattern) {
+		crypto.rand_bytes(psk_buf[:])
+		psk = psk_buf[:]
 	}
 
-	initiator_handshakestate, ini_ini_status := handshakestate_initialize(
-		true,
-		nil,
-		initiator_s,
-		nil,
-		ini_rs,
-		nil,
-		protocol_name = protocol_name,
-		psk = psk,
-	)
-	responder_handshakestate, res_ini_status := handshakestate_initialize(
-		false,
-		nil,
-		responder_s,
-		nil,
-		res_rs,
-		nil,
-		protocol_name = protocol_name,
-		psk = psk,
-	)
+	ini_hs, res_hs: Handshake_State
+	status := handshake_init(&ini_hs, true, nil, ini_s, res_s_pub, protocol_name, psk)
+	if !testing.expectf(t, status == .Ok, "failed to initialize initiator Handshake_State: %v", status) {
+		return false
+	}
+	status = handshake_init(&res_hs, false, nil, res_s, ini_s_pub, protocol_name, psk)
+	if !testing.expectf(t, status == .Ok, "failed to initialize responder Handshake_State: %v", status) {
+		return false
+	}
 
-	time.stopwatch_stop(&sw)
-	fmt.println("Time 2: ", time.stopwatch_duration(sw))
-	if ini_ini_status != .Ok { any_test_failed = true}
-	if res_ini_status != .Ok { any_test_failed = true}
-
-	ini_status, res_status : NoiseStatus
-	ini_cstates, res_cstates : CipherStates
-	ini_message, res_message : []u8
-	res_complete := false
-	time.stopwatch_reset(&sw)
-	for {
+	ini_status, res_status: Status
+	ini_msg, res_msg: []byte
+	ini_payload, res_payload: []byte
+	hs_msg_buf: [MAX_STEP_MSG_SIZE]byte
+	for i := 0; ; i += 1{
 		if ini_status == .Handshake_Complete && res_status == .Handshake_Complete {
 			break
 		}
-		ini_cstates, res_message, ini_status = initiator_step(&initiator_handshakestate, ini_message, nil)
+
+		// Test the allocation path
+		res_msg, res_payload, ini_status = handshake_initiator_step(&ini_hs, ini_msg, allocator = allocator)
+		ini_msg = nil
+
 		if ini_status == .Handshake_Complete && res_status == .Handshake_Complete {
 			break
 		}
-		res_cstates, ini_message, res_status = responder_step(&responder_handshakestate, res_message, nil)
+
+		if !testing.expectf(t, len(res_payload) == 0, "step %d: unexpected responder payload: %x", i, res_payload) {
+			return false
+		}
+		if !testing.expectf(t, ini_status == .Handshake_Pending || ini_status == .Handshake_Complete, "step %d: initiator step failed: %v", i, ini_status) {
+			return false
+		}
+
+		// Test the non-allocation path
+		ini_msg, ini_payload, res_status = handshake_responder_step(&res_hs, res_msg, nil, hs_msg_buf[:])
+		delete(res_msg, allocator)
+		res_msg = nil
+
+		if !testing.expectf(t, len(ini_payload) == 0, "step %d: unexpected initiator payload: %x", i, ini_payload) {
+			return false
+		}
+		if !testing.expectf(t, res_status == .Handshake_Pending || res_status == .Handshake_Complete, "step %d: responder step failed: %v", i, res_status) {
+			return false
+		}
+	}
+	delete(res_msg, allocator)
+
+	hs_pub: ^ecdh.Public_Key
+	if ini_s != nil {
+		hs_pub, status = handshake_peer_identity(&res_hs)
+		if !testing.expect(t, status == .Ok) {
+			return false
+		}
+		if !testing.expectf(t, ecdh.public_key_equal(&ini_s._pub_key, hs_pub), "responder has incorrect initiator identity") {
+			return false
+		}
+	}
+	if res_s != nil {
+		hs_pub, status = handshake_peer_identity(&ini_hs)
+		if !testing.expect(t, status == .Ok) {
+			return false
+		}
+		if !testing.expectf(t, ecdh.public_key_equal(&res_s._pub_key, hs_pub), "initiator has incorrect responder identity") {
+			return false
+		}
 	}
 
-	assert(ini_cstates.c1_i_to_r == res_cstates.c1_i_to_r)
-	assert(ini_cstates.c2_r_to_i == res_cstates.c2_r_to_i)
-
-	time.stopwatch_start(&sw)
-	og_test_data := make([]u8, 65_000)
-	defer delete(og_test_data)
-	crypto.rand_bytes(og_test_data[:])
-	backup_og := slice.clone(og_test_data)
-	defer delete(backup_og)
-
-	prepared_test_data, status := prepare_message(&ini_cstates, og_test_data[:])
-	if status != .Ok {
-		fmt.println(status)
-		panic("   ")
+	h1, h2: []byte
+	h1, status = handshake_hash(&ini_hs)
+	if !testing.expect(t, status == .Ok) {
+		return false
 	}
-	decrypted_test_data, decrypt_status := open_message(&res_cstates, prepared_test_data)
-	fmt.println(decrypt_status)
-	time.stopwatch_stop(&sw)
-	fmt.println("Time cipher: ", time.stopwatch_duration(sw))
-	// fmt.println(backup_og[:])
-	// fmt.println(decrypted_test_data)
-	fmt.println(len(decrypted_test_data))
-	fmt.println(len(backup_og))
-	assert(slice.equal(backup_og[:], decrypted_test_data))
-
-	fmt.println("SUCCESS!!")
-
-	return ini_cstates, res_cstates
-}
-
-test_1000_messages :: proc(ini_cstates: ^CipherStates, res_cstates: ^CipherStates) {
-	for i in 0..<1000 {
-		ini_message : [4096]u8
-		crypto.rand_bytes(ini_message[:])
-		ini_message_backup: = ini_message
-
-		prepared_ini_message, ini_prep_status := prepare_message(ini_cstates, ini_message[:])
-		opened_ini_message, ini_open_status := open_message(res_cstates, prepared_ini_message)
-
-		assert(slice.equal(ini_message_backup[:], opened_ini_message))
+	h2, status = handshake_hash(&res_hs)
+	if !testing.expect(t, status == .Ok) {
+		return false
 	}
+	if !testing.expectf(t, bytes.equal(h1, h2), "handshake hash mismatch: %x != %x", h1, h2) {
+		return false
+	}
+
+	ini_cs, res_cs: Cipher_States
+	if !testing.expectf(t, .Ok == handshake_split(&ini_hs, &ini_cs), "failed to split initiator: %v") {
+		return false
+	}
+	if !testing.expectf(t, .Ok == handshake_split(&res_hs, &res_cs), "failed to split responder: %v") {
+		return false
+	}
+
+	handshake_reset(&ini_hs)
+	handshake_reset(&res_hs)
+
+	if !testing.expect(t, test_messages(t, &ini_cs, &res_cs, is_one_way, allocator), "message tests failed") {
+		return false
+	}
+
+	cipherstates_reset(&ini_cs)
+	cipherstates_reset(&res_cs)
+
+	return true
 }
 
 @(private = "file")
-random_protocol :: proc() -> Protocol {
-	cipher  := random_cipher()
-	dh      := random_dh()
-	hash	:= random_hash()
-	HandP   := Handshake_Pattern(rand.int_range(1, len(Handshake_Pattern)))
-	return Protocol {
-		cipher = cipher,
-		dh = dh,
-		hash = hash,
-		handshake_pattern = HandP,
+test_messages :: proc(t: ^testing.T, ini_cs, res_cs: ^Cipher_States, is_one_way: bool, allocator := context.allocator) -> bool {
+	ad_buf: [256]byte = ---
+	payload_buf: [MAX_PACKET_SIZE-TAG_SIZE]byte = ---
+
+	for i in 0..<10 {
+		ad := ad_buf[:rand.int_max(len(ad_buf))]
+		payload := payload_buf[:rand.int_max(len(payload_buf))]
+
+		_ = rand.read(payload)
+		_ = rand.read(ad)
+
+		// Initiator -> Responder (allocate buffers)
+		tx_msg, status := seal_message(ini_cs, ad, payload, allocator = allocator)
+		defer delete(tx_msg, allocator)
+		if !testing.expectf(t, status == .Ok, "i->r %d: seal failed: %v", i, status) {
+			return false
+		}
+
+		rx_dst: []byte
+		rx_dst, status = open_message(res_cs, ad, tx_msg, allocator = allocator)
+		defer delete(rx_dst, allocator)
+		if !testing.expectf(t, status == .Ok, "i->r %d: open failed: %v", i, status) {
+			return false
+		}
+
+		if !testing.expectf(t, bytes.equal(rx_dst, payload), "i->r %d: payload mismatch") {
+			return false
+		}
+
+		if i == 5 {
+			status = rekey(ini_cs, true)
+			if !testing.expectf(t, status == .Ok, "i %d: rekey failed: %v", i, status) {
+				return false
+			}
+			status = rekey(res_cs, false)
+			if !testing.expectf(t, status == .Ok, "r %d: rekey failed: %v", i, status) {
+				return false
+			}
+		}
+
+		if is_one_way {
+			continue
+		}
+
+		// Responder -> Initiator (reuse allocated buffers)
+		tx_msg, status = seal_message(res_cs, ad, payload, tx_msg)
+		if !testing.expectf(t, status == .Ok, "r->i %d: seal failed: %v", i, status) {
+			return false
+		}
+
+		_, status = open_message(ini_cs, ad, tx_msg, rx_dst)
+		if !testing.expectf(t, status == .Ok, "r->i %d: open failed: %v", i, status) {
+			return false
+		}
+
+		if !testing.expectf(t, bytes.equal(rx_dst, payload), "r-i %d: payload mismatch") {
+			return false
+		}
 	}
+
+	return true
 }
 
 @(private = "file")
-random_cipher :: proc() -> aead.Algorithm {
-	if rand.int_max(2) == 0 {
-		return .AES_GCM_256
-	}
-	return .CHACHA20POLY1305
+Test_Protocol :: struct {
+	handshake_pattern: Handshake_Pattern,
+	dh: ecdh.Curve,
+	cipher: aead.Algorithm,
+	hash: hash.Algorithm,
 }
 
 @(private = "file")
-random_dh :: proc() -> ecdh.Curve {
-	if rand.int_max(2) == 0 {
-		return .X25519
+test_protocol_string :: proc(protocol: ^Test_Protocol, allocator := context.allocator) -> string {
+	dh: string
+	#partial switch protocol.dh {
+	case .X25519: dh = "25519"
+	case .X448: dh = "448"
+	case: panic("crypto/noise: unsupported DH")
 	}
-	return .X448
-}
 
-@(private = "file")
-random_hash :: proc() -> hash.Algorithm {
-	switch rand.int_max(4) {
-	case 0: return .SHA256
-	case 1: return .SHA512
-	case 2: return .BLAKE2S
-	case 3: return .BLAKE2B
+	cipher: string
+	#partial switch protocol.cipher {
+	case .AES_GCM_256: cipher = "AESGCM"
+	case .CHACHA20POLY1305: cipher = "ChaChaPoly"
+	case: panic("crypto/noise: unsupported cipher")
 	}
+
+	hash: string
+	#partial switch protocol.hash {
+	case .SHA256: hash = "SHA256"
+	case .SHA512: hash = "SHA512"
+	case .BLAKE2S: hash = "Blake2s"
+	case .BLAKE2B: hash = "Blake2b"
+	case: panic("crypto/noise: unsupported hash")
+	}
+
+	return fmt.aprintf("Noise_%v_%v_%v_%v", protocol.handshake_pattern, dh, cipher, hash, allocator = allocator)
 }
