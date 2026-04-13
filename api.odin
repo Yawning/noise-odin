@@ -50,6 +50,7 @@ Status :: enum {
 	Out_Of_Memory,
 }
 
+// Handshake_State is the per-handshake state.
 Handshake_State :: struct {
 	s: ecdh.Private_Key,
 	e: ecdh.Private_Key,
@@ -67,6 +68,8 @@ Handshake_State :: struct {
 	pre_set_e: bool,
 }
 
+// Cipher_States are the keyed AEAD instances and associated state,
+// derived from a successful handshake.
 Cipher_States :: struct {
 	c1_i_to_r: Cipher_State,
 	c2_r_to_i: Cipher_State,
@@ -74,6 +77,14 @@ Cipher_States :: struct {
 	initiator: bool,
 }
 
+// handshake_init initializes a Handshake_State with the provided parameters.
+// The relevant values are copied into the Handshake_State instance, and
+// can be discarded/sanitized right after handshake_init returns (eg: psk).
+//
+// Note: While this implementation supports setting `e`, this is primarily
+// intended for testing, or cases where the runtime cryptographic entropy
+// source is unavailable.  Use of this functionality is STRONGLY
+// discouraged.
 @(require_results)
 handshake_init :: proc(
 	self: ^Handshake_State,
@@ -83,7 +94,7 @@ handshake_init :: proc(
 	rs: ^ecdh.Public_Key, // Peer static key
 	protocol_name: string,
 	psk: []byte = nil,
-	_e: ^ecdh.Private_Key = nil, // Our ephemeral key (for testing/RNG-less systems).
+	_e: ^ecdh.Private_Key = nil, // Our ephemeral key (for testing/RNG-less systems)
 ) -> Status {
 	return handshakestate_Initialize(
 		self,
@@ -98,6 +109,17 @@ handshake_init :: proc(
 	)
 }
 
+// handshake_initiator_step takes an input_message received from the responder
+// if any and an optional payload to be sent to the responder, and performs
+// one step of the Noise handshake process, returning the message to be sent
+// to the responder if any, the payload received from the responder if any,
+// and the status of the handshake.
+//
+// The output message MUST be sent to the responder even if the status code
+// returned is .Handshake_Complete.
+//
+// If the dst parameter is provided, the message and payload will be written
+// to dst, otherwise new buffers will be allocated.
 @(require_results)
 handshake_initiator_step :: proc(
 	self: ^Handshake_State,
@@ -126,6 +148,17 @@ handshake_initiator_step :: proc(
 	return output_message, payload_buffer, status
 }
 
+// handshake_responder_step takes a input_message received from the initiator,
+// and and an optional payload to be sent to the initiator, and performs
+// one step of the Noise handshake process, returning the message to be sent
+// to the initiator if any, the payload received from the initiator if any,
+// and the status of the handshake.
+//
+// The output message MUST be sent to the initiator even if the status code
+// returned is .Handshake_Complete.
+//
+// If the dst parameter is provided, the message and payload will be written
+// to dst, otherwise new buffers will be allocated.
 @(require_results)
 handshake_responder_step :: proc(
 	self: ^Handshake_State,
@@ -152,6 +185,9 @@ handshake_responder_step :: proc(
 	return output_message, payload_buffer, status
 }
 
+// handshake_split initializes a Cipher_States instance from a completed
+// handshake.  This can be called once and only once per Handshake_State
+// instance.
 @(require_results)
 handshake_split :: proc(self: ^Handshake_State, cipher_states: ^Cipher_States) -> Status {
 	if self.status != .Handshake_Complete {
@@ -169,6 +205,12 @@ handshake_split :: proc(self: ^Handshake_State, cipher_states: ^Cipher_States) -
 	return .Ok
 }
 
+// handshake_peer_identity returns the peer's static DH key used by
+// a completed handshake.
+//
+// This returns a pointer to the Handshake_State's copy of the peer's
+// public key, that will get wiped by handshake_reset.  If the key is
+// needed after a call to handshake_reset, it must be copied.
 @(require_results)
 handshake_peer_identity :: proc(self: ^Handshake_State) -> (^ecdh.Public_Key, Status) {
 	#partial switch self.status {
@@ -184,6 +226,13 @@ handshake_peer_identity :: proc(self: ^Handshake_State) -> (^ecdh.Public_Key, St
 	return &self.rs, .Ok
 }
 
+// handshake_hash returns the handshake transcript hash of a completed
+// handshake, for the purposes of channel binding.  See 11.2 of the
+// specification for details on usage.
+//
+// This returns a slice to an internal buffer that will get wiped by
+// handshake_reset.  If the hash is needed after a call to handshake_reset,
+// the slice must be copied.
 @(require_results)
 handshake_hash :: proc(self: ^Handshake_State) -> ([]byte, Status) {
 	#partial switch self.status {
@@ -195,13 +244,23 @@ handshake_hash :: proc(self: ^Handshake_State) -> ([]byte, Status) {
 	return symmetricstate_GetHandshakeHash(&self.symmetric_state), .Ok
 }
 
+// handshake_reset sanitizes the Handshake_State.  It is both safe and
+// recommended to call this as soon as practical (after any calls to
+// handshake_peer_identity, handshake_hash, and handshake_split are
+// complete).
 handshake_reset :: proc(self: ^Handshake_State) {
 	handshakestate_reset(self)
 }
 
+// seal_message encrypts the provided data, authenticates the aad and
+// ciphertext, and returns the resulting ciphertext.  The ciphertext
+// will ALWAYS be `len(plaintext) + TAG_SIZE` bytes in length.
+//
+// If the dst parameter is provided, the ciphertext will be written
+// to dst, otherwise a new buffer will be allocated.
 @(require_results)
-seal_message :: proc(self: ^Cipher_States, ad, data: []byte, dst: []byte = nil, allocator := context.allocator) -> ([]byte, Status) {
-	data_len := len(data)
+seal_message :: proc(self: ^Cipher_States, aad, plaintext: []byte, dst: []byte = nil, allocator := context.allocator) -> ([]byte, Status) {
+	data_len := len(plaintext)
 
 	dst := dst
 	did_alloc: bool
@@ -222,9 +281,9 @@ seal_message :: proc(self: ^Cipher_States, ad, data: []byte, dst: []byte = nil, 
 	status: Status
 	switch self.initiator {
 	case true:
-		dst, status = cipherstate_EncryptWithAd(&self.c1_i_to_r, ad, data, dst)
+		dst, status = cipherstate_EncryptWithAd(&self.c1_i_to_r, aad, plaintext, dst)
 	case false:
-		dst, status = cipherstate_EncryptWithAd(&self.c2_r_to_i, ad, data, dst)
+		dst, status = cipherstate_EncryptWithAd(&self.c2_r_to_i, aad, plaintext, dst)
 	}
 	if status != .Ok && did_alloc {
 		delete(dst, allocator)
@@ -234,8 +293,14 @@ seal_message :: proc(self: ^Cipher_States, ad, data: []byte, dst: []byte = nil, 
 	return dst, status
 }
 
+// open_message authenticates the aad and ciphertext, decrypts the
+// ciphertext and returns the resulting plaintext.  The plaintext will
+// ALWAYS be `len(ciphertext) - TAG_SIZE` bytes in length.
+//
+// If the dst parameter is provided, the plaintext will be written to
+// dst, otherwise a new buffer will be allocated.
 @(require_results)
-open_message :: proc(self: ^Cipher_States, ad, ciphertext: []byte, dst: []byte = nil, allocator := context.allocator) -> ([]byte, Status) {
+open_message :: proc(self: ^Cipher_States, aad, ciphertext: []byte, dst: []byte = nil, allocator := context.allocator) -> ([]byte, Status) {
 	if len(ciphertext) < TAG_SIZE {
 		return nil, .Invalid_Payload_Message
 	}
@@ -263,9 +328,9 @@ open_message :: proc(self: ^Cipher_States, ad, ciphertext: []byte, dst: []byte =
 	status: Status
 	switch self.initiator {
 	case true:
-		dst, status = cipherstate_DecryptWithAd(&self.c2_r_to_i, ad, ciphertext, dst)
+		dst, status = cipherstate_DecryptWithAd(&self.c2_r_to_i, aad, ciphertext, dst)
 	case false:
-		dst, status = cipherstate_DecryptWithAd(&self.c1_i_to_r, ad, ciphertext, dst)
+		dst, status = cipherstate_DecryptWithAd(&self.c1_i_to_r, aad, ciphertext, dst)
 	}
 	if status != .Ok && did_alloc {
 		delete(dst, allocator)
@@ -275,6 +340,11 @@ open_message :: proc(self: ^Cipher_States, ad, ciphertext: []byte, dst: []byte =
 	return dst, status
 }
 
+// rekey updates the selected AEAD key, using a one way function.  See
+// 11.3 of the specification for examples of usage.
+//
+// Note: If one side updates the seal_key, the other side must update
+// the non-seal_key and vice versa.
 @(require_results)
 rekey :: proc(self: ^Cipher_States, seal_key: bool) -> Status {
 	cs: ^Cipher_State
@@ -307,6 +377,7 @@ rekey :: proc(self: ^Cipher_States, seal_key: bool) -> Status {
 	return .Ok
 }
 
+// cipherstates_reset sanitizes the Cipher_States.
 cipherstates_reset :: proc(self: ^Cipher_States) {
 	self.initiator = false
 	cipherstate_reset(&self.c1_i_to_r)

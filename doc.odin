@@ -15,9 +15,10 @@ package noise
 //   passing `nil` as the `input_message` parameter.
 //
 // - Send the resulting `[]byte` to the responder (generally a server) via
-//   the method of your choice.
+//   the method of your choice.  This MUST be done even if the status code
+//   returned is `.Handshake_Complete`.
 //
-// - If the status code returned by `handshake_ initiator_step` was
+// - If the status code returned by `handshake_initiator_step` was
 //   `.Handshake_Complete`, the handshake completed successfully,
 //   and it is now possible to validate the peer identity, obtain the
 //   handshake transcript hash, and most usefully call `handshake_split`
