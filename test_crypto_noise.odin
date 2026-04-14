@@ -235,11 +235,11 @@ test_messages :: proc(t: ^testing.T, ini_cs, res_cs: ^Cipher_States, is_one_way:
 		}
 
 		if i == 5 {
-			status = rekey(ini_cs, true)
+			status = cipherstates_rekey(ini_cs, true)
 			if !testing.expectf(t, status == .Ok, "i %d: rekey failed: %v", i, status) {
 				return false
 			}
-			status = rekey(res_cs, false)
+			status = cipherstates_rekey(res_cs, false)
 			if !testing.expectf(t, status == .Ok, "r %d: rekey failed: %v", i, status) {
 				return false
 			}

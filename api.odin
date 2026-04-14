@@ -340,31 +340,14 @@ open_message :: proc(self: ^Cipher_States, aad, ciphertext: []byte, dst: []byte 
 	return dst, status
 }
 
-// rekey updates the selected AEAD key, using a one way function.  See
-// 11.3 of the specification for examples of usage.
+// cipherstates_rekey updates the selected AEAD key, using a one way function.
+// See 11.3 of the specification for examples of usage.
 //
 // Note: If one side updates the seal_key, the other side must update
 // the non-seal_key and vice versa.
 @(require_results)
-rekey :: proc(self: ^Cipher_States, seal_key: bool) -> Status {
-	cs: ^Cipher_State
-	switch self.initiator {
-	case true:
-		switch seal_key {
-		case true:
-			cs = &self.c1_i_to_r
-		case false:
-			cs = &self.c2_r_to_i
-		}
-	case false:
-		switch seal_key {
-		case true:
-			cs = &self.c2_r_to_i
-		case false:
-			cs = &self.c1_i_to_r
-		}
-	}
-
+cipherstates_rekey :: proc(self: ^Cipher_States, seal_key: bool) -> Status {
+	cs := cipherstates_cs(self, seal_key)
 	if cs.is_invalid {
 		return .Invalid_Cipher_State
 	}
@@ -377,9 +360,70 @@ rekey :: proc(self: ^Cipher_States, seal_key: bool) -> Status {
 	return .Ok
 }
 
+// cipherstates_set_n sets the interal counter used to generate the AEAD
+// IV to an explicit value.  This can be used to deal with out-of-order
+// transport messages.  See 11.4 of the specification.
+//
+// WARNING: Reusing n across different aad/messages with the same Cipher_States
+// will result in catastrophic loss of security.
+@(require_results)
+cipherstates_set_n :: proc(self: ^Cipher_States, seal_key: bool, n: u64) -> Status {
+	cs := cipherstates_cs(self, seal_key)
+	if cs.is_invalid {
+		return .Invalid_Cipher_State
+	}
+	if !cipherstate_HasKey(cs) {
+		return .Handshake_Pending
+	}
+
+	cs.n = n
+
+	return .Ok
+}
+
+// cipherstates_n returns the interal counter used to generate the AEAD
+// IV.  This can be used to deal with out-of-order transport messages.
+// See 11.4 of the specification.
+//
+// WARNING: Reusing n across different aad/messages with the same Cipher_States
+// will result in catastrophic loss of security.
+@(require_results)
+cipherstates_n :: proc(self: ^Cipher_States, seal_key: bool, n: u64) -> (u64, Status) {
+	cs := cipherstates_cs(self, seal_key)
+	if cs.is_invalid {
+		return 0, .Invalid_Cipher_State
+	}
+	if !cipherstate_HasKey(cs) {
+		return 0, .Handshake_Pending
+	}
+
+	return cs.n, .Ok
+}
+
 // cipherstates_reset sanitizes the Cipher_States.
 cipherstates_reset :: proc(self: ^Cipher_States) {
 	self.initiator = false
 	cipherstate_reset(&self.c1_i_to_r)
 	cipherstate_reset(&self.c2_r_to_i)
+}
+
+@(private = "file")
+cipherstates_cs :: proc(self: ^Cipher_States, seal_key: bool) -> ^Cipher_State {
+	switch self.initiator {
+	case true:
+		switch seal_key {
+		case true:
+			return &self.c1_i_to_r
+		case false:
+			return &self.c2_r_to_i
+		}
+	case false:
+		switch seal_key {
+		case true:
+			return &self.c2_r_to_i
+		case false:
+			return &self.c1_i_to_r
+		}
+	}
+	unreachable()
 }
